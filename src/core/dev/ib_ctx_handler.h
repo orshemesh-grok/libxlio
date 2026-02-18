@@ -11,11 +11,12 @@
 #include <string>
 #include <unordered_map>
 
+#include <mellanox/dpcp.h>
+
 #include "event/event_handler_ibverbs.h"
 #include "dev/time_converter.h"
 #include "ib/base/verbs_extra.h"
 #include "utils/lock_wrapper.h"
-#include <mellanox/dpcp.h>
 
 typedef std::unordered_map<uint32_t, struct ibv_mr *> mr_map_lkey_t;
 

@@ -89,12 +89,9 @@ err:
         delete m_p_ibv_device_attr;
     }
 
-    if (m_p_ibv_pd) {
-        ibv_dealloc_pd(m_p_ibv_pd);
-    }
-
     if (m_p_adapter) {
         delete m_p_adapter;
+        m_p_ibv_pd = nullptr;
         m_p_ibv_context = nullptr;
     }
 }
@@ -113,23 +110,16 @@ ib_ctx_handler::~ib_ctx_handler()
     while ((iter = m_mr_map_lkey.begin()) != m_mr_map_lkey.end()) {
         mem_dereg(iter->first);
     }
-    if (m_p_ibv_pd) {
-        IF_VERBS_FAILURE_EX(ibv_dealloc_pd(m_p_ibv_pd), EIO)
-        {
-            ibch_logdbg("pd deallocation failure (errno=%d %m)", errno);
-        }
-        ENDIF_VERBS_FAILURE;
-        VALGRIND_MAKE_MEM_UNDEFINED(m_p_ibv_pd, sizeof(struct ibv_pd));
-        m_p_ibv_pd = nullptr;
-    }
 
     if (m_p_ctx_time_converter) {
         m_p_ctx_time_converter->clean_obj();
     }
     delete m_p_ibv_device_attr;
 
+    // Adapter owns the PD (created via create_ibv_pd) and will free it on destruction.
     if (m_p_adapter) {
         delete m_p_adapter;
+        m_p_ibv_pd = nullptr;
         m_p_ibv_context = nullptr;
     }
 
@@ -231,41 +221,29 @@ dpcp::adapter *ib_ctx_handler::set_dpcp_adapter(const std::string &device_name)
         return nullptr;
     }
 
-    struct ibv_pd *pd = ibv_alloc_pd(ctx);
-    if (!pd) {
-        ibch_logerr("failed pd allocation for %p context (errno=%d %m) ", ctx, errno);
+    status = adapter->create_ibv_pd();
+    if (dpcp::DPCP_OK != status) {
+        ibch_logerr("failed pd allocation for adapter '%s' (status=%d, errno=%d %m)",
+                    device_name.c_str(), status, errno);
         delete adapter;
         return nullptr;
     }
 
-    mlx5dv_obj mlx5_obj;
-    mlx5_obj.pd.in = pd;
-    mlx5dv_pd out_pd;
-    mlx5_obj.pd.out = &out_pd;
-
-    int ret = xlio_ib_mlx5dv_init_obj(&mlx5_obj, MLX5DV_OBJ_PD);
-    if (ret) {
-        ibch_logerr("failed getting mlx5_pd for adapter '%s' (errno=%d %m)",
-                    device_name.c_str(), errno);
-        ibv_dealloc_pd(pd);
-        delete adapter;
-        return nullptr;
-    }
-
-    adapter->set_pd(out_pd.pdn, pd);
     status = adapter->open();
     if (dpcp::DPCP_OK != status) {
         ibch_logerr("failed opening dpcp adapter %s got %d",
                     adapter->get_name().c_str(), status);
-        ibv_dealloc_pd(pd);
         delete adapter;
         return nullptr;
     }
 
+    void *ibv_pd_ptr = nullptr;
+    adapter->get_ibv_pd(ibv_pd_ptr);
+
     m_p_adapter = adapter;
     m_p_ibv_context = ctx;
     m_p_ibv_device = m_p_ibv_context->device;
-    m_p_ibv_pd = pd;
+    m_p_ibv_pd = (struct ibv_pd *)ibv_pd_ptr;
     check_capabilities();
     ibch_logdbg("dpcp adapter: %s is up", adapter->get_name().c_str());
 

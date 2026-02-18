@@ -25,6 +25,8 @@
 
 #include "ib_ctx_handler_collection.h"
 
+#include <mellanox/dpcp.h>
+
 #define MODULE_NAME "ndtm"
 
 #define ndtm_logpanic   __log_panic
@@ -76,12 +78,13 @@ net_device_table_mgr::net_device_table_mgr()
 
     /* throw exception if there are no supported devices. */
     if (m_net_device_map_index.empty()) {
-        int num_devices = 0;
-        struct ibv_device **dev_list = nullptr;
-        dev_list = xlio_ibv_get_device_list(&num_devices);
-        if (dev_list && num_devices == 0) {
-            ibv_free_device_list(dev_list);
-            ndtm_logdbg("net_device_map is empty %d", num_devices);
+        dpcp::provider *p_provider = nullptr;
+        size_t adapters_num = 0;
+        if (dpcp::DPCP_OK == dpcp::provider::get_instance(p_provider) && p_provider) {
+            p_provider->get_adapter_info_lst(nullptr, adapters_num);
+        }
+        if (adapters_num == 0) {
+            ndtm_logdbg("net_device_map is empty, no adapters found");
             free_ndtm_resources();
             throw_xlio_exception("net_device_map is empty");
         }

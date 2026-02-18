@@ -8,6 +8,7 @@
 #define IB_CTX_HANDLER_H
 
 #include <infiniband/verbs.h>
+#include <string>
 #include <unordered_map>
 
 #include "event/event_handler_ibverbs.h"
@@ -34,7 +35,7 @@ struct pacing_caps_t {
 class ib_ctx_handler : public event_handler_ibverbs {
 public:
     struct ib_ctx_handler_desc {
-        struct ibv_device *device;
+        std::string device_name;
     };
 
 public:
@@ -49,7 +50,7 @@ public:
     ibv_device *get_ibv_device() { return m_p_ibv_device; }
     inline char *get_ibname() { return (m_p_ibv_device ? m_p_ibv_device->name : (char *)""); }
     struct ibv_context *get_ibv_context() { return m_p_ibv_context; }
-    dpcp::adapter *set_dpcp_adapter();
+    dpcp::adapter *set_dpcp_adapter(const std::string &device_name);
     dpcp::adapter *get_dpcp_adapter() { return m_p_adapter; }
     void check_capabilities();
     xlio_ibv_device_attr *get_ibv_device_attr()

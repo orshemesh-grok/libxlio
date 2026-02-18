@@ -31,7 +31,8 @@
 #define ibch_logfuncall __log_info_funcall
 
 ib_ctx_handler::ib_ctx_handler(struct ib_ctx_handler_desc *desc)
-    : m_p_ibv_pd(nullptr)
+    : m_p_ibv_device(nullptr)
+    , m_p_ibv_pd(nullptr)
     , m_flow_tag_enabled(false)
     , m_on_device_memory(0)
     , m_removed(false)
@@ -43,16 +44,14 @@ ib_ctx_handler::ib_ctx_handler(struct ib_ctx_handler_desc *desc)
         ibch_logpanic("Invalid ib_ctx_handler");
     }
 
-    m_p_ibv_device = desc->device;
-
-    if (!m_p_ibv_device) {
-        ibch_logpanic("m_p_ibv_device is invalid");
+    if (desc->device_name.empty()) {
+        ibch_logpanic("device_name is empty");
     }
 
-    m_p_adapter = set_dpcp_adapter();
+    m_p_adapter = set_dpcp_adapter(desc->device_name);
     if (!m_p_adapter) {
-        ibch_logpanic("ibv device %p adapter allocation failure (errno=%d %m)", m_p_ibv_device,
-                      errno);
+        ibch_logpanic("adapter allocation failure for device '%s' (errno=%d %m)",
+                      desc->device_name.c_str(), errno);
     }
     VALGRIND_MAKE_MEM_DEFINED(m_p_ibv_pd, sizeof(struct ibv_pd));
 
@@ -196,120 +195,79 @@ int parse_dpcp_version(const char *dpcp_ver)
     return (loops == 0U ? ver : 0);
 }
 
-dpcp::adapter *ib_ctx_handler::set_dpcp_adapter()
+dpcp::adapter *ib_ctx_handler::set_dpcp_adapter(const std::string &device_name)
 {
     dpcp::status status;
     dpcp::provider *p_provider = nullptr;
-    dpcp::adapter_info *dpcp_lst = nullptr;
-    size_t adapters_num = 0;
-    size_t i = 0;
+    dpcp::adapter *adapter = nullptr;
     int dpcp_ver = 0;
 
     m_p_adapter = nullptr;
-    if (!m_p_ibv_device) {
-        return nullptr;
-    }
 
     status = dpcp::provider::get_instance(p_provider);
     if (dpcp::DPCP_OK != status) {
         ibch_logerr("failed getting provider status = %d", status);
-        goto err;
+        return nullptr;
     }
 
     dpcp_ver = parse_dpcp_version(p_provider->get_version());
     if (dpcp_ver < DEFINED_DPCP_MIN) {
         ibch_logerr("Incompatible dpcp vesrion %d. Min supported version %d", dpcp_ver,
                     DEFINED_DPCP_MIN);
-        goto err;
+        return nullptr;
     }
 
-    /*
-     * get_adapter_info_lst() returns number of adapters in response to NULL or
-     * 0 arguments along with DPCP_ERR_OUT_OF_RANGE error. On success, the
-     * number of actual adapters is not set, so we need a separate call here.
-     */
-    status = p_provider->get_adapter_info_lst(nullptr, adapters_num);
-    if (dpcp::DPCP_ERR_OUT_OF_RANGE != status || 0 == adapters_num) {
-        ibch_logdbg("found no adapters status = %d", status);
-        goto err;
+    status = p_provider->open_adapter(device_name, adapter);
+    if (dpcp::DPCP_OK != status || !adapter) {
+        ibch_logerr("failed opening adapter '%s' status = %d", device_name.c_str(), status);
+        return nullptr;
     }
 
-    dpcp_lst = new (std::nothrow) dpcp::adapter_info[static_cast<unsigned>(adapters_num)];
-    if (!dpcp_lst) {
-        ibch_logerr("failed allocating memory for devices");
-        goto err;
+    struct ibv_context *ctx = (ibv_context *)adapter->get_ibv_context();
+    if (!ctx) {
+        ibch_logerr("failed getting context for adapter '%s' (errno=%d %m)",
+                    device_name.c_str(), errno);
+        delete adapter;
+        return nullptr;
     }
 
-    status = p_provider->get_adapter_info_lst(dpcp_lst, adapters_num);
+    struct ibv_pd *pd = ibv_alloc_pd(ctx);
+    if (!pd) {
+        ibch_logerr("failed pd allocation for %p context (errno=%d %m) ", ctx, errno);
+        delete adapter;
+        return nullptr;
+    }
+
+    mlx5dv_obj mlx5_obj;
+    mlx5_obj.pd.in = pd;
+    mlx5dv_pd out_pd;
+    mlx5_obj.pd.out = &out_pd;
+
+    int ret = xlio_ib_mlx5dv_init_obj(&mlx5_obj, MLX5DV_OBJ_PD);
+    if (ret) {
+        ibch_logerr("failed getting mlx5_pd for adapter '%s' (errno=%d %m)",
+                    device_name.c_str(), errno);
+        ibv_dealloc_pd(pd);
+        delete adapter;
+        return nullptr;
+    }
+
+    adapter->set_pd(out_pd.pdn, pd);
+    status = adapter->open();
     if (dpcp::DPCP_OK != status) {
-        ibch_logerr("failed getting adapter list");
-        goto err;
+        ibch_logerr("failed opening dpcp adapter %s got %d",
+                    adapter->get_name().c_str(), status);
+        ibv_dealloc_pd(pd);
+        delete adapter;
+        return nullptr;
     }
 
-    for (i = 0; i < adapters_num; i++) {
-        if (dpcp_lst[i].name == m_p_ibv_device->name) {
-            dpcp::adapter *adapter = nullptr;
-
-            status = p_provider->open_adapter(dpcp_lst[i].name, adapter);
-            if ((dpcp::DPCP_OK == status) && (adapter)) {
-                int ret = 0;
-                struct ibv_context *ctx = nullptr;
-                struct ibv_pd *pd = nullptr;
-                mlx5dv_obj mlx5_obj;
-
-                ctx = (ibv_context *)adapter->get_ibv_context();
-                if (!ctx) {
-                    ibch_logerr("failed getting context for adapter %p (errno=%d %m) ", adapter,
-                                errno);
-                    delete adapter;
-                    goto err;
-                }
-
-                pd = ibv_alloc_pd(ctx);
-                if (!pd) {
-                    ibch_logerr("failed pd allocation for %p context (errno=%d %m) ", ctx, errno);
-                    delete adapter;
-                    goto err;
-                }
-
-                mlx5_obj.pd.in = pd;
-                mlx5dv_pd out_pd;
-                mlx5_obj.pd.out = &out_pd;
-
-                ret = xlio_ib_mlx5dv_init_obj(&mlx5_obj, MLX5DV_OBJ_PD);
-                if (ret) {
-                    /* coverity[uninit_use_in_call] */
-                    ibch_logerr("failed getting mlx5_pd for %p (errno=%d %m) ", m_p_ibv_pd, errno);
-                    ibv_dealloc_pd(pd);
-                    delete adapter;
-                    goto err;
-                }
-
-                adapter->set_pd(out_pd.pdn, pd);
-                status = adapter->open();
-                if (dpcp::DPCP_OK != status) {
-                    ibch_logerr("failed opening dpcp adapter %s got %d",
-                                adapter->get_name().c_str(), status);
-                    ibv_dealloc_pd(pd);
-                    delete adapter;
-                    goto err;
-                }
-
-                m_p_adapter = adapter;
-                m_p_ibv_context = ctx;
-                m_p_ibv_pd = pd;
-                check_capabilities();
-                ibch_logdbg("dpcp adapter: %s is up", adapter->get_name().c_str());
-            }
-
-            break;
-        }
-    }
-
-err:
-    if (dpcp_lst) {
-        delete[] dpcp_lst;
-    }
+    m_p_adapter = adapter;
+    m_p_ibv_context = ctx;
+    m_p_ibv_device = m_p_ibv_context->device;
+    m_p_ibv_pd = pd;
+    check_capabilities();
+    ibch_logdbg("dpcp adapter: %s is up", adapter->get_name().c_str());
 
     return m_p_adapter;
 }

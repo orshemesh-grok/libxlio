@@ -6,11 +6,11 @@
 
 #include <vector>
 
+#include <mellanox/dpcp.h>
+
 #include "utils/bullseye.h"
 #include "vlogger/vlogger.h"
 #include "ib_ctx_handler_collection.h"
-
-#include "ib/base/verbs_extra.h"
 #include "util/utils.h"
 #include "event/event_handler_manager.h"
 
@@ -121,58 +121,61 @@ ib_ctx_handler_collection::~ib_ctx_handler_collection()
 
 void ib_ctx_handler_collection::update_tbl(const char *ifa_name)
 {
-    struct ibv_device **dev_list = nullptr;
-    ib_ctx_handler *p_ib_ctx_handler = nullptr;
-    int num_devices = 0;
-    int i;
+    dpcp::provider *p_provider = nullptr;
+    dpcp::status status;
+    size_t adapters_num = 0;
 
     ibchc_logdbg("Checking for offload capable IB devices...");
 
-    dev_list = xlio_ibv_get_device_list(&num_devices);
-
+    status = dpcp::provider::get_instance(p_provider);
     BULLSEYE_EXCLUDE_BLOCK_START
-    if (!dev_list) {
-        ibchc_logerr("Failure in xlio_ibv_get_device_list() (error=%d %m)", errno);
+    if (dpcp::DPCP_OK != status || !p_provider) {
+        ibchc_logerr("Failure getting dpcp provider (status=%d, error=%d %m)", status, errno);
         ibchc_logerr("Please check rdma configuration");
         errno = ENODEV;
         throw_xlio_exception("No IB capable devices found!");
     }
-    if (!num_devices) {
-        vlog_levels_t _level =
-            ifa_name ? VLOG_DEBUG : VLOG_ERROR; // Print an error only during initialization.
-        vlog_printf(_level, PRODUCT_NAME " does not detect IB capable devices\n");
-        vlog_printf(_level, "No performance gain is expected in current configuration\n");
-    }
-
     BULLSEYE_EXCLUDE_BLOCK_END
 
-    for (i = 0; i < num_devices; i++) {
-        struct ib_ctx_handler::ib_ctx_handler_desc desc = {dev_list[i]};
+    status = p_provider->get_adapter_info_lst(nullptr, adapters_num);
+    if (dpcp::DPCP_ERR_OUT_OF_RANGE != status || 0 == adapters_num) {
+        vlog_levels_t _level =
+            ifa_name ? VLOG_DEBUG : VLOG_ERROR;
+        vlog_printf(_level, PRODUCT_NAME " does not detect IB capable devices\n");
+        vlog_printf(_level, "No performance gain is expected in current configuration\n");
+        return;
+    }
 
-        /* 2. Skip existing devices (compare by name) */
-        if (ifa_name && !check_device_name_ib_name(ifa_name, dev_list[i]->name)) {
+    std::vector<dpcp::adapter_info> adapter_list(adapters_num);
+    status = p_provider->get_adapter_info_lst(adapter_list.data(), adapters_num);
+    if (dpcp::DPCP_OK != status) {
+        ibchc_logerr("Failed getting adapter list (status=%d)", status);
+        return;
+    }
+
+    for (size_t i = 0; i < adapters_num; i++) {
+        const std::string &dev_name = adapter_list[i].name;
+
+        /* Skip existing devices (compare by name) */
+        if (ifa_name && !check_device_name_ib_name(ifa_name, dev_name.c_str())) {
             continue;
         }
 
-        if (ib_ctx_handler::is_mlx4(dev_list[i]->name)) {
-            // Check if mlx4 steering creation is supported.
+        if (ib_ctx_handler::is_mlx4(dev_name.c_str())) {
             check_flow_steering_log_num_mgm_entry_size();
         }
 
-        /* 3. Add new ib devices */
-        p_ib_ctx_handler = new ib_ctx_handler(&desc);
+        /* Add new ib devices */
+        struct ib_ctx_handler::ib_ctx_handler_desc desc = {dev_name};
+        ib_ctx_handler *p_ib_ctx_handler = new ib_ctx_handler(&desc);
         if (!p_ib_ctx_handler) {
             ibchc_logerr("failed allocating new ib_ctx_handler (errno=%d %m)", errno);
             continue;
         }
-        m_ib_ctx_map[p_ib_ctx_handler->get_ibv_device()] = p_ib_ctx_handler;
+        m_ib_ctx_map[dev_name] = p_ib_ctx_handler;
     }
 
     ibchc_logdbg("Check completed. Found %lu offload capable IB devices", m_ib_ctx_map.size());
-
-    if (dev_list) {
-        ibv_free_device_list(dev_list);
-    }
 }
 
 void ib_ctx_handler_collection::print_val_tbl()
@@ -224,7 +227,7 @@ ib_ctx_handler *ib_ctx_handler_collection::get_ib_ctx(const char *ifa_name)
 void ib_ctx_handler_collection::del_ib_ctx(ib_ctx_handler *ib_ctx)
 {
     if (ib_ctx) {
-        ib_context_map_t::iterator ib_ctx_iter = m_ib_ctx_map.find(ib_ctx->get_ibv_device());
+        ib_context_map_t::iterator ib_ctx_iter = m_ib_ctx_map.find(ib_ctx->get_ibname());
         if (ib_ctx_iter != m_ib_ctx_map.end()) {
             delete ib_ctx_iter->second;
             m_ib_ctx_map.erase(ib_ctx_iter);

@@ -7,12 +7,12 @@
 #ifndef IB_CTX_HANDLER_COLLECTION_H
 #define IB_CTX_HANDLER_COLLECTION_H
 
+#include <string>
 #include <unordered_map>
 
-#include "ib/base/verbs_extra.h"
 #include "ib_ctx_handler.h"
 
-typedef std::unordered_map<struct ibv_device *, ib_ctx_handler *> ib_context_map_t;
+typedef std::unordered_map<std::string, ib_ctx_handler *> ib_context_map_t;
 
 class ib_ctx_handler_collection {
 public:

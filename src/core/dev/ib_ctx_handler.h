@@ -18,7 +18,7 @@
 #include "ib/base/verbs_extra.h"
 #include "utils/lock_wrapper.h"
 
-typedef std::unordered_map<uint32_t, struct ibv_mr *> mr_map_lkey_t;
+typedef std::unordered_map<uint32_t, dpcp::direct_mkey *> mr_map_lkey_t;
 
 struct pacing_caps_t {
     uint32_t rate_limit_min;
@@ -59,10 +59,10 @@ public:
         return xlio_get_device_orig_attr(m_p_ibv_device_attr);
     }
     xlio_ibv_device_attr_ex *get_ibv_device_attr_ex() { return m_p_ibv_device_attr; }
-    uint32_t mem_reg(void *addr, size_t length, uint64_t access);
+    uint32_t mem_reg(void *addr, size_t length);
     void mem_dereg(uint32_t lkey);
-    struct ibv_mr *get_mem_reg(uint32_t lkey);
-    uint32_t user_mem_reg(void *addr, size_t length, uint64_t access);
+    dpcp::direct_mkey *get_mem_reg(uint32_t lkey);
+    uint32_t user_mem_reg(void *addr, size_t length);
     bool is_removed() { return m_removed; }
     void set_ctx_time_converter_status(ts_conversion_mode_t conversion_mode);
     void set_flow_tag_capability(bool flow_tag_capability);

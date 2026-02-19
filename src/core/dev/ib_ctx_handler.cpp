@@ -331,18 +331,19 @@ void ib_ctx_handler::set_ctx_time_converter_status(ts_conversion_mode_t conversi
 #endif // DEFINED_IBV_CQ_TIMESTAMP
 }
 
-uint32_t ib_ctx_handler::mem_reg(void *addr, size_t length, uint64_t access)
+uint32_t ib_ctx_handler::mem_reg(void *addr, size_t length)
 {
-    struct ibv_mr *mr = nullptr;
+    dpcp::direct_mkey *mkey = nullptr;
     uint32_t lkey = LKEY_ERROR;
 
-    mr = ibv_reg_mr(m_p_ibv_pd, addr, length, access);
-    VALGRIND_MAKE_MEM_DEFINED(mr, sizeof(ibv_mr));
-    if (!mr) {
+    dpcp::status rc = m_p_adapter->create_direct_mkey(addr, length, dpcp::MKEY_NONE, mkey);
+    if (dpcp::DPCP_OK != rc || !mkey) {
         print_warning_rlimit_memlock(length, errno);
     } else {
-        m_mr_map_lkey[mr->lkey] = mr;
-        lkey = mr->lkey;
+        uint32_t id = 0;
+        mkey->get_id(id);
+        m_mr_map_lkey[id] = mkey;
+        lkey = id;
 
         ibch_logdbg("dev:%s (%p) addr=%p length=%lu pd=%p", get_ibname(), m_p_ibv_device, addr,
                     length, m_p_ibv_pd);
@@ -355,22 +356,19 @@ void ib_ctx_handler::mem_dereg(uint32_t lkey)
 {
     auto iter = m_mr_map_lkey.find(lkey);
     if (iter != m_mr_map_lkey.end()) {
-        struct ibv_mr *mr = iter->second;
-        ibch_logdbg("dev:%s (%p) addr=%p length=%lu pd=%p", get_ibname(), m_p_ibv_device, mr->addr,
-                    mr->length, m_p_ibv_pd);
-        IF_VERBS_FAILURE_EX(ibv_dereg_mr(mr), EIO)
-        {
-            ibch_logdbg("failed de-registering a memory region "
-                        "(errno=%d %m)",
-                        errno);
-        }
-        ENDIF_VERBS_FAILURE;
-        VALGRIND_MAKE_MEM_UNDEFINED(mr, sizeof(ibv_mr));
+        dpcp::direct_mkey *mkey = iter->second;
+        void *addr = nullptr;
+        size_t len = 0;
+        mkey->get_address(addr);
+        mkey->get_length(len);
+        ibch_logdbg("dev:%s (%p) addr=%p length=%lu pd=%p", get_ibname(), m_p_ibv_device, addr, len,
+                    m_p_ibv_pd);
+        delete mkey;
         m_mr_map_lkey.erase(iter);
     }
 }
 
-struct ibv_mr *ib_ctx_handler::get_mem_reg(uint32_t lkey)
+dpcp::direct_mkey *ib_ctx_handler::get_mem_reg(uint32_t lkey)
 {
     auto iter = m_mr_map_lkey.find(lkey);
     if (iter != m_mr_map_lkey.end()) {
@@ -380,7 +378,7 @@ struct ibv_mr *ib_ctx_handler::get_mem_reg(uint32_t lkey)
     return nullptr;
 }
 
-uint32_t ib_ctx_handler::user_mem_reg(void *addr, size_t length, uint64_t access)
+uint32_t ib_ctx_handler::user_mem_reg(void *addr, size_t length)
 {
     std::lock_guard<decltype(m_lock_umr)> lock(m_lock_umr);
     uint32_t lkey;
@@ -389,7 +387,7 @@ uint32_t ib_ctx_handler::user_mem_reg(void *addr, size_t length, uint64_t access
     if (iter != m_user_mem_lkey_map.end()) {
         lkey = iter->second;
     } else {
-        lkey = mem_reg(addr, length, access);
+        lkey = mem_reg(addr, length);
         if (lkey == LKEY_ERROR) {
             ibch_logerr("Can't register user memory addr %p len %lx", addr, length);
         } else {

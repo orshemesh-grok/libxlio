@@ -168,8 +168,6 @@ typedef struct ibv_values_ex xlio_ts_values;
     } while (0)
 typedef struct ibv_tso_caps xlio_ibv_tso_caps;
 typedef struct ibv_send_wr xlio_ibv_send_wr;
-// ibv_reg_mr
-#define XLIO_IBV_ACCESS_LOCAL_WRITE IBV_ACCESS_LOCAL_WRITE
 
 #ifdef DEFINED_IBV_CQ_ATTR_MODERATE
 typedef struct ibv_modify_cq_attr xlio_ibv_cq_attr;

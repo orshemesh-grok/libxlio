@@ -58,15 +58,13 @@ public:
     xlio_registrator();
     virtual ~xlio_registrator();
 
-    bool register_memory(void *data, size_t size, ib_ctx_handler *p_ib_ctx_h, uint64_t access);
     bool register_memory(void *data, size_t size, ib_ctx_handler *p_ib_ctx_h);
     void deregister_memory();
 
     uint32_t find_lkey_by_ib_ctx(ib_ctx_handler *p_ib_ctx_h) const;
 
 private:
-    uint32_t register_memory_single(void *data, size_t size, ib_ctx_handler *p_ib_ctx_h,
-                                    uint64_t access);
+    uint32_t register_memory_single(void *data, size_t size, ib_ctx_handler *p_ib_ctx_h);
 
     std::unordered_map<ib_ctx_handler *, uint32_t> m_lkey_map_ib_ctx;
 };
@@ -78,7 +76,6 @@ public:
     xlio_allocator_hw(alloc_t alloc_func, free_t free_func);
     virtual ~xlio_allocator_hw();
 
-    void *alloc_and_reg_mr(size_t size, ib_ctx_handler *p_ib_ctx_h, uint64_t access);
     void *alloc_and_reg_mr(size_t size, ib_ctx_handler *p_ib_ctx_h);
     bool register_memory(ib_ctx_handler *p_ib_ctx_h);
 };

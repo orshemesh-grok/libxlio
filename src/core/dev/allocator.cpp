@@ -233,7 +233,7 @@ xlio_registrator::~xlio_registrator()
 }
 
 uint32_t xlio_registrator::register_memory_single(void *data, size_t size,
-                                                  ib_ctx_handler *p_ib_ctx_h, uint64_t access)
+                                                  ib_ctx_handler *p_ib_ctx_h)
 {
     uint32_t lkey;
 
@@ -243,7 +243,7 @@ uint32_t xlio_registrator::register_memory_single(void *data, size_t size,
         return LKEY_ERROR;
     }
 
-    lkey = p_ib_ctx_h->mem_reg(data, size, access);
+    lkey = p_ib_ctx_h->mem_reg(data, size);
     if (lkey == LKEY_ERROR) {
         __log_info_warn("Failure during memory registration on dev %s addr=%p size=%zu",
                         p_ib_ctx_h->get_ibname(), data, size);
@@ -275,14 +275,13 @@ uint32_t xlio_registrator::register_memory_single(void *data, size_t size,
     return lkey;
 }
 
-bool xlio_registrator::register_memory(void *data, size_t size, ib_ctx_handler *p_ib_ctx_h,
-                                       uint64_t access)
+bool xlio_registrator::register_memory(void *data, size_t size, ib_ctx_handler *p_ib_ctx_h)
 {
     uint32_t lkey;
 
     if (p_ib_ctx_h) {
         // Specific ib context path
-        lkey = register_memory_single(data, size, p_ib_ctx_h, access);
+        lkey = register_memory_single(data, size, p_ib_ctx_h);
         return lkey != LKEY_ERROR;
     }
 
@@ -291,7 +290,7 @@ bool xlio_registrator::register_memory(void *data, size_t size, ib_ctx_handler *
     if (likely(ib_ctx_map)) {
         for (const auto &ib_ctx_key_val : *ib_ctx_map) {
             p_ib_ctx_h = ib_ctx_key_val.second;
-            lkey = register_memory_single(data, size, p_ib_ctx_h, access);
+            lkey = register_memory_single(data, size, p_ib_ctx_h);
 
             if (lkey == LKEY_ERROR) {
                 deregister_memory();
@@ -300,11 +299,6 @@ bool xlio_registrator::register_memory(void *data, size_t size, ib_ctx_handler *
         }
     }
     return true;
-}
-
-bool xlio_registrator::register_memory(void *data, size_t size, ib_ctx_handler *p_ib_ctx_h)
-{
-    return register_memory(data, size, p_ib_ctx_h, XLIO_IBV_ACCESS_LOCAL_WRITE);
 }
 
 void xlio_registrator::deregister_memory()
@@ -357,22 +351,17 @@ xlio_allocator_hw::~xlio_allocator_hw()
 {
 }
 
-void *xlio_allocator_hw::alloc_and_reg_mr(size_t size, ib_ctx_handler *p_ib_ctx_h, uint64_t access)
+void *xlio_allocator_hw::alloc_and_reg_mr(size_t size, ib_ctx_handler *p_ib_ctx_h)
 {
     m_data = alloc(size);
     if (!m_data) {
         return nullptr;
     }
 
-    if (!xlio_registrator::register_memory(m_data, m_size, p_ib_ctx_h, access)) {
+    if (!xlio_registrator::register_memory(m_data, m_size, p_ib_ctx_h)) {
         dealloc();
     }
     return m_data;
-}
-
-void *xlio_allocator_hw::alloc_and_reg_mr(size_t size, ib_ctx_handler *p_ib_ctx_h)
-{
-    return alloc_and_reg_mr(size, p_ib_ctx_h, XLIO_IBV_ACCESS_LOCAL_WRITE);
 }
 
 bool xlio_allocator_hw::register_memory(ib_ctx_handler *p_ib_ctx_h)

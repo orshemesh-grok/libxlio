@@ -12,6 +12,7 @@
 #include <mutex>
 #include <unordered_map>
 
+#include <mellanox/dpcp.h>
 #include "dev/gro_mgr.h"
 #include "dev/hw_queue_tx.h"
 #include "dev/hw_queue_rx.h"
@@ -78,7 +79,14 @@ public:
     int modify_ratelimit(struct xlio_rate_limit_t &rate_limit) override;
     int get_tx_channel_fd() const override
     {
-        return m_p_tx_comp_event_channel ? m_p_tx_comp_event_channel->fd : -1;
+        if (!m_p_tx_comp_event_channel) {
+            return -1;
+        }
+        event_channel *ch = nullptr;
+        if (m_p_tx_comp_event_channel->get_comp_channel(ch) == dpcp::DPCP_OK && ch) {
+            return *ch;
+        }
+        return -1;
     }
     uint32_t get_tx_user_lkey(void *addr, size_t length) override;
     uint32_t get_max_inline_data() override;
@@ -97,7 +105,7 @@ public:
     }
     bool is_tso(void) override;
 
-    struct ibv_comp_channel *get_tx_comp_event_channel() { return m_p_tx_comp_event_channel; }
+    dpcp::comp_channel *get_tx_comp_event_channel() { return m_p_tx_comp_event_channel; }
     void modify_cq_moderation(uint32_t period, uint32_t count);
 
     void update_tso_stats(uint64_t bytes)
@@ -279,6 +287,18 @@ protected:
     std::unordered_map<void *, uint32_t> m_user_lkey_map;
 
 private:
+    static int get_rx_channel_fd_helper(dpcp::comp_channel *cc)
+    {
+        if (!cc) {
+            return -1;
+        }
+        event_channel *ch = nullptr;
+        if (cc->get_comp_channel(ch) == dpcp::DPCP_OK && ch) {
+            return *ch;
+        }
+        return -1;
+    }
+
     lock_mutex m_lock_ring_tx_buf_wait;
     uint32_t m_tx_num_bufs = 0U;
     uint32_t m_zc_num_bufs = 0U;
@@ -289,8 +309,8 @@ private:
     gro_mgr m_gro_mgr;
     bool m_up_tx = false;
     bool m_up_rx = false;
-    struct ibv_comp_channel *m_p_rx_comp_event_channel = nullptr;
-    struct ibv_comp_channel *m_p_tx_comp_event_channel = nullptr;
+    dpcp::comp_channel *m_p_rx_comp_event_channel = nullptr;
+    dpcp::comp_channel *m_p_tx_comp_event_channel = nullptr;
     L2_address *m_p_l2_addr = nullptr;
     uint32_t m_mtu;
 

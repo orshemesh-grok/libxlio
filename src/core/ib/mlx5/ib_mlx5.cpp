@@ -14,97 +14,100 @@
 #include "util/utils.h"
 #include "ib/mlx5/ib_mlx5.h"
 
-int xlio_ib_mlx5_get_qp_tx(xlio_ib_mlx5_qp_t *mlx5_qp)
+int xlio_ib_mlx5_get_qp_tx(dpcp::pp_sq *sq, xlio_ib_mlx5_qp_t *mlx5_qp)
 {
-    int ret = 0;
-    struct mlx5dv_obj obj;
-    struct mlx5dv_qp dqp;
-    enum ibv_qp_attr_mask attr_mask = IBV_QP_CAP;
-    struct ibv_qp_attr tmp_ibv_qp_attr;
-    struct ibv_qp_init_attr tmp_ibv_qp_init_attr;
-
-    memset(&obj, 0, sizeof(obj));
-    memset(&dqp, 0, sizeof(dqp));
-
-    obj.qp.in = mlx5_qp->qp;
-    obj.qp.out = &dqp;
-#if defined(DEFINED_DV_RAW_QP_HANDLES)
-    /* coverity[assigned_value] */
-    dqp.comp_mask |= MLX5DV_QP_MASK_RAW_QP_HANDLES;
-#endif /* DEFINED_DV_RAW_QP_HANDLES */
-    ret = xlio_ib_mlx5dv_init_obj(&obj, MLX5DV_OBJ_QP);
-    if (ret != 0) {
-        goto out;
+    if (!sq || !mlx5_qp) {
+        return -1;
     }
 
-    VALGRIND_MAKE_MEM_DEFINED(&dqp, sizeof(dqp));
-    mlx5_qp->qpn = mlx5_qp->qp->qp_num;
-    /* coverity[var_deref_op] */
-    mlx5_qp->sq.dbrec = &dqp.dbrec[MLX5_SND_DBR];
-    mlx5_qp->sq.buf = dqp.sq.buf;
-    mlx5_qp->sq.wqe_cnt = dqp.sq.wqe_cnt;
-    mlx5_qp->sq.stride = dqp.sq.stride;
-    mlx5_qp->bf.reg = dqp.bf.reg;
-#if defined(DEFINED_DV_RAW_QP_HANDLES)
-    mlx5_qp->tisn = dqp.tisn;
-    mlx5_qp->sqn = dqp.sqn;
-#endif /* DEFINED_DV_RAW_QP_HANDLES */
-
-    ret = ibv_query_qp(mlx5_qp->qp, &tmp_ibv_qp_attr, attr_mask, &tmp_ibv_qp_init_attr);
-    if (ret != 0) {
-        goto out;
+    uint32_t sqn = 0;
+    if (sq->get_id(sqn) != dpcp::DPCP_OK) {
+        return -1;
     }
 
-    VALGRIND_MAKE_MEM_DEFINED(&tmp_ibv_qp_attr, sizeof(tmp_ibv_qp_attr));
-    mlx5_qp->cap.max_send_wr = tmp_ibv_qp_attr.cap.max_send_wr;
-    mlx5_qp->cap.max_send_sge = tmp_ibv_qp_attr.cap.max_send_sge;
-    mlx5_qp->cap.max_inline_data = tmp_ibv_qp_attr.cap.max_inline_data;
+    void *wq_buf = nullptr;
+    if (sq->get_wq_buf(wq_buf) != dpcp::DPCP_OK) {
+        return -1;
+    }
 
-out:
-    return ret;
+    uint32_t *dbrec = nullptr;
+    if (sq->get_dbrec(dbrec) != dpcp::DPCP_OK) {
+        return -1;
+    }
+
+    uint64_t *bf_reg = nullptr;
+    if (sq->get_bf_reg(bf_reg) != dpcp::DPCP_OK) {
+        return -1;
+    }
+
+    uint32_t wqe_num = 0;
+    if (sq->get_wqe_num(wqe_num) != dpcp::DPCP_OK) {
+        return -1;
+    }
+
+    uint32_t wqe_sz = 0;
+    if (sq->get_wqe_sz(wqe_sz) != dpcp::DPCP_OK) {
+        return -1;
+    }
+
+    mlx5_qp->qpn = sqn;
+    mlx5_qp->sqn = sqn;
+    mlx5_qp->sq.buf = wq_buf;
+    mlx5_qp->sq.dbrec = dbrec;
+    mlx5_qp->sq.wqe_cnt = wqe_num;
+    mlx5_qp->sq.stride = wqe_sz;
+    mlx5_qp->bf.reg = (void *)bf_reg;
+
+    return 0;
 }
 
-int xlio_ib_mlx5_get_cq(struct ibv_cq *cq, xlio_ib_mlx5_cq_t *mlx5_cq)
+int xlio_ib_mlx5_get_cq(dpcp::cq *cq, xlio_ib_mlx5_cq_t *mlx5_cq)
 {
-    int ret = 0;
-    struct mlx5dv_obj obj;
-    struct mlx5dv_cq dcq;
-
-    /* Initialization of cq can be done once to protect
-     * internal data from corruption.
-     * cq field is used to detect one time initialization
-     * For example: this function can be called when QP is moved
-     * from ERROR state to RESET so cq_ci or cq_sn should not be
-     * updated
-     */
-    if (!mlx5_cq || mlx5_cq->cq == cq) {
+    if (!mlx5_cq || !cq || mlx5_cq->initialized) {
         return 0;
     }
 
-    memset(&obj, 0, sizeof(obj));
-    memset(&dcq, 0, sizeof(dcq));
-
-    obj.cq.in = cq;
-    obj.cq.out = &dcq;
-    ret = xlio_ib_mlx5dv_init_obj(&obj, MLX5DV_OBJ_CQ);
-    if (ret != 0) {
-        return ret;
+    uint32_t cqn = 0;
+    if (cq->get_id(cqn) != dpcp::DPCP_OK) {
+        return -1;
     }
-    VALGRIND_MAKE_MEM_DEFINED(&dcq, sizeof(dcq));
-    mlx5_cq->cq = cq;
-    mlx5_cq->cq_num = dcq.cqn;
+
+    void *cq_buf = nullptr;
+    if (cq->get_cq_buf(cq_buf) != dpcp::DPCP_OK) {
+        return -1;
+    }
+
+    uint32_t *dbrec = nullptr;
+    if (cq->get_dbrec(dbrec) != dpcp::DPCP_OK) {
+        return -1;
+    }
+
+    volatile void *uar_page = nullptr;
+    if (cq->get_uar_page(uar_page) != dpcp::DPCP_OK) {
+        return -1;
+    }
+
+    uint32_t cqe_num = 0;
+    if (cq->get_cqe_num(cqe_num) != dpcp::DPCP_OK) {
+        return -1;
+    }
+
+    size_t cqe_size = cq->get_cqe_sz();
+
+    mlx5_cq->initialized = true;
+    mlx5_cq->cq_num = cqn;
     mlx5_cq->cq_ci = 0;
     mlx5_cq->cq_sn = 0;
-    mlx5_cq->cqe_count = dcq.cqe_cnt;
-    mlx5_cq->cqe_size = dcq.cqe_size;
-    mlx5_cq->cqe_size_log = ilog_2(dcq.cqe_size);
-    mlx5_cq->dbrec = dcq.dbrec;
-    mlx5_cq->uar = dcq.cq_uar;
+    mlx5_cq->cqe_count = cqe_num;
+    mlx5_cq->cqe_size = cqe_size;
+    mlx5_cq->cqe_size_log = ilog_2(cqe_size);
+    mlx5_cq->dbrec = dbrec;
+    mlx5_cq->uar = (void *)uar_page;
 
     /* Move buffer forward for 128b CQE, so we would get pointer to the 2nd
      * 64b when polling.
      */
-    mlx5_cq->cq_buf = (uint8_t *)dcq.buf + dcq.cqe_size - sizeof(struct xlio_mlx5_cqe);
+    mlx5_cq->cq_buf = (uint8_t *)cq_buf + cqe_size - sizeof(struct xlio_mlx5_cqe);
 
     return 0;
 }

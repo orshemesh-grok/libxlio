@@ -15,7 +15,7 @@ class cq_mgr_rx_strq : public cq_mgr_rx {
 public:
     cq_mgr_rx_strq(ring_simple *p_ring, ib_ctx_handler *p_ib_ctx_handler, uint32_t cq_size,
                    uint32_t stride_size_bytes, uint32_t strides_num,
-                   struct ibv_comp_channel *p_comp_event_channel);
+                   dpcp::comp_channel *p_comp_event_channel);
 
     virtual ~cq_mgr_rx_strq() override;
 

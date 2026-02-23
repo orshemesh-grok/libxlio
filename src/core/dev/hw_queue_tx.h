@@ -67,7 +67,7 @@ public:
     void send_wqe(xlio_ibv_send_wr *p_send_wqe, xlio_wr_tx_packet_attr attr, xlio_tis *tis,
                   unsigned credits);
 
-    struct ibv_qp *get_ibv_qp() const { return m_mlx5_qp.qp; };
+    uint32_t get_sqn() const { return m_mlx5_qp.qpn; };
     cq_mgr_tx *get_tx_cq_mgr() const { return m_p_cq_mgr_tx; }
     uint32_t get_max_inline_data() const { return m_mlx5_qp.cap.max_inline_data; }
     uint32_t get_max_send_sge() const { return m_mlx5_qp.cap.max_send_sge; }
@@ -176,7 +176,7 @@ private:
     cq_mgr_tx *init_tx_cq_mgr();
 
     int configure(const slave_data_t *slave);
-    int prepare_queue(xlio_ibv_qp_init_attr &qp_init_attr);
+    int prepare_queue();
     void init_queue();
     void init_device_memory();
     void trigger_completion_for_all_sent_packets();
@@ -232,8 +232,9 @@ private:
     xlio_ib_mlx5_qp_t m_mlx5_qp;
     ring_simple *m_p_ring;
     cq_mgr_tx *m_p_cq_mgr_tx;
-    cq_mgr_rx *m_p_cq_mgr_rx_unused;
     ib_ctx_handler *m_p_ib_ctx_handler;
+    dpcp::pp_sq *m_p_sq = nullptr;
+    std::unique_ptr<xlio_tis> m_default_tis;
     sq_wqe_prop *m_sq_wqe_idx_to_prop = nullptr;
     sq_wqe_prop *m_sq_wqe_prop_last = nullptr;
 

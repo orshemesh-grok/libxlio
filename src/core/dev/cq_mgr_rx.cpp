@@ -43,7 +43,7 @@
     } while (0)
 
 cq_mgr_rx::cq_mgr_rx(ring_simple *p_ring, ib_ctx_handler *p_ib_ctx_handler, int cq_size,
-                     struct ibv_comp_channel *p_comp_event_channel)
+                     dpcp::comp_channel *p_comp_event_channel)
     : m_p_ring(p_ring)
     , m_n_sysvar_cq_poll_batch_max(safe_mce_sys().cq_poll_batch_max)
     , m_n_sysvar_progress_engine_wce_max(safe_mce_sys().progress_engine_wce_max)
@@ -74,39 +74,41 @@ cq_mgr_rx::cq_mgr_rx(ring_simple *p_ring, ib_ctx_handler *p_ib_ctx_handler, int 
 
 void cq_mgr_rx::configure(int cq_size)
 {
-    struct ibv_context *context = m_p_ib_ctx_handler->get_ibv_context();
-    int comp_vector = 0;
+    dpcp::adapter *adapter = m_p_ib_ctx_handler->get_dpcp_adapter();
+    if (!adapter) {
+        throw_xlio_exception("dpcp adapter not available for RX CQ creation");
+    }
+
+    uint32_t eqn = 0;
+    uint32_t comp_vector = 0;
 #if defined(DEFINED_NGINX) || defined(DEFINED_ENVOY)
-    /*
-     * For some scenario with forking usage we may want to distribute CQs across multiple
-     * CPUs to improve CPS in case of multiple processes.
-     */
     if (safe_mce_sys().app.distribute_cq_interrupts && g_p_app->get_worker_id() >= 0) {
-        comp_vector = g_p_app->get_worker_id() % context->num_comp_vectors;
+        comp_vector = g_p_app->get_worker_id();
     }
 #endif
-
-    struct ibv_cq_init_attr_ex attr = {};
-    struct mlx5dv_cq_init_attr dvattr = {};
-
-    attr.cqe = cq_size - 1; // This parameter is incremented by 1 in libibverbs
-    attr.cq_context = (void *)this;
-    attr.channel = m_comp_event_channel;
-    attr.comp_vector = comp_vector;
-    attr.wc_flags = IBV_WC_STANDARD_FLAGS;
-    attr.comp_mask = IBV_CQ_INIT_ATTR_MASK_FLAGS;
-    attr.flags = IBV_CREATE_CQ_ATTR_IGNORE_OVERRUN;
-
-    struct ibv_cq_ex *cq_ex = mlx5dv_create_cq(context, &attr, &dvattr);
-    m_p_ibv_cq = ibv_cq_ex_to_cq(cq_ex);
-    BULLSEYE_EXCLUDE_BLOCK_START
-    if (!m_p_ibv_cq) {
-        cq_logerr("Failed to create CQ, this: %p, ctx: %p size: %d compch: %p", this, context,
-                  cq_size - 1, m_comp_event_channel);
-        throw_xlio_exception("ibv_create_cq failed");
+    if (adapter->query_eqn(eqn, comp_vector) != dpcp::DPCP_OK) {
+        throw_xlio_exception("Failed to query EQN for RX CQ");
     }
-    BULLSEYE_EXCLUDE_BLOCK_END
-    VALGRIND_MAKE_MEM_DEFINED(m_p_ibv_cq, sizeof(ibv_cq));
+
+        dpcp::cq_attr cq_attr = {};
+    cq_attr.cq_sz = cq_size;
+    cq_attr.eq_num = eqn;
+    cq_attr.cq_attr_use.set(dpcp::CQ_SIZE);
+    cq_attr.cq_attr_use.set(dpcp::CQ_EQ_NUM);
+
+    dpcp::status rc = adapter->create_cq(cq_attr, m_p_cq);
+    if (rc != dpcp::DPCP_OK || !m_p_cq) {
+        cq_logerr("Failed to create CQ, this: %p, size: %d compch: %p", this, cq_size,
+                  m_comp_event_channel);
+        throw_xlio_exception("dpcp create_cq failed for RX CQ");
+    }
+
+    if (m_comp_event_channel) {
+        rc = m_comp_event_channel->bind(*m_p_cq);
+        if (rc != dpcp::DPCP_OK) {
+            cq_logwarn("Failed to bind RX comp_channel to CQ (rc=%d)", (int)rc);
+        }
+    }
 
     xlio_stats_instance_create_cq_block(m_p_cq_stat);
 
@@ -114,8 +116,17 @@ void cq_mgr_rx::configure(int cq_size)
 
     cq_logdbg("RX CSUM support = %d", m_b_is_rx_hw_csum_on);
 
-    cq_logdbg("Created CQ as Rx with fd[%d] and of size %d elements (ibv_cq_hndl=%p)",
-              get_channel_fd(), cq_size, m_p_ibv_cq);
+    cq_logdbg("Created CQ as Rx with fd[%d] and of size %d elements (dpcp::cq=%p)",
+              get_channel_fd(), cq_size, m_p_cq);
+}
+
+uint32_t cq_mgr_rx::get_cqn()
+{
+    uint32_t cqn = 0;
+    if (m_p_cq) {
+        m_p_cq->get_id(cqn);
+    }
+    return cqn;
 }
 
 cq_mgr_rx::~cq_mgr_rx()
@@ -133,13 +144,9 @@ cq_mgr_rx::~cq_mgr_rx()
         m_p_cq_stat->n_buffer_pool_len = m_rx_pool.size();
     }
 
-    cq_logfunc("destroying ibv_cq");
-    IF_VERBS_FAILURE_EX(ibv_destroy_cq(m_p_ibv_cq), EIO)
-    {
-        cq_logdbg("destroy cq failed (errno=%d %m)", errno);
-    }
-    ENDIF_VERBS_FAILURE;
-    VALGRIND_MAKE_MEM_UNDEFINED(m_p_ibv_cq, sizeof(ibv_cq));
+    cq_logfunc("destroying dpcp cq");
+    delete m_p_cq;
+    m_p_cq = nullptr;
 
     g_p_net_device_table_mgr->increase_closed_rings_rx_cq_drop_counter(
         m_p_cq_stat->n_rx_hw_pkt_drops);
@@ -170,7 +177,7 @@ void cq_mgr_rx::add_hqrx(hw_queue_rx *hqrx_ptr)
     m_hqrx_ptr->m_rq_wqe_counter = 0; // In case of bonded hqrx, wqe_counter must be reset to zero
     m_rx_hot_buffer = nullptr;
 
-    if (0 != xlio_ib_mlx5_get_cq(m_p_ibv_cq, &m_mlx5_cq)) {
+    if (0 != xlio_ib_mlx5_get_cq(m_p_cq, &m_mlx5_cq)) {
         cq_logpanic("xlio_ib_mlx5_get_cq failed (errno=%d %m)", errno);
     }
 
@@ -469,34 +476,22 @@ void cq_mgr_rx::wait_for_notification_and_process_element(void *pv_fd_ready_arra
     cq_logfunc("");
 
     if (m_b_notification_armed) {
-        struct ibv_cq *p_cq_hndl = nullptr;
-        void *p = nullptr; // deal with compiler warnings
-
-        // Block on the cq_mgr_rx's notification event channel
-        IF_VERBS_FAILURE(ibv_get_cq_event(m_comp_event_channel, &p_cq_hndl, &p))
-        {
-            cq_logwarn("waiting on cq_mgr_rx event returned with error (errno=%d %m)", errno);
+        if (!m_comp_event_channel || !m_p_cq) {
+            cq_logwarn("comp_channel or cq is null");
+            return;
         }
-        else
-        {
+
+        dpcp::eq_context eq_ctx = {};
+        dpcp::status rc = m_comp_event_channel->request(*m_p_cq, eq_ctx);
+        if (rc != dpcp::DPCP_OK) {
+            cq_logwarn("waiting on cq_mgr_rx event returned with error (rc=%d errno=%d %m)",
+                       (int)rc, errno);
+        } else {
             get_cq_event();
-            cq_mgr_rx *p_cq_mgr_context = (cq_mgr_rx *)p;
-            if (p_cq_mgr_context != this) {
-                cq_logerr("mismatch with cq_mgr_rx returned from new event (event->cq_mgr_rx->%p)",
-                          p_cq_mgr_context);
-                // this can be if we are using a single channel for several/all cq_mgrs
-                // in this case we need to deliver the event to the correct cq_mgr_rx
-            }
 
-            // Ack event
-            ibv_ack_cq_events(m_p_ibv_cq, 1);
-
-            // Clear flag
             m_b_notification_armed = false;
 
-            // Now try processing the ready element
             poll_and_process_element_rx(pv_fd_ready_array);
         }
-        ENDIF_VERBS_FAILURE;
     }
 }

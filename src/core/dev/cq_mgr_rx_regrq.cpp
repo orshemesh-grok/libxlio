@@ -25,7 +25,7 @@
 #define cq_logfuncall __log_info_funcall
 
 cq_mgr_rx_regrq::cq_mgr_rx_regrq(ring_simple *p_ring, ib_ctx_handler *p_ib_ctx_handler,
-                                 uint32_t cq_size, struct ibv_comp_channel *p_comp_event_channel)
+                                 uint32_t cq_size, dpcp::comp_channel *p_comp_event_channel)
     : cq_mgr_rx(p_ring, p_ib_ctx_handler, cq_size, p_comp_event_channel)
 {
     cq_logfunc("");

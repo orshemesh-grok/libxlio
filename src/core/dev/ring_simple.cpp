@@ -139,24 +139,18 @@ ring_simple::~ring_simple()
 
     delete_l2_address();
 
-    // Delete the rx channel fd from the global fd collection
     if (g_p_fd_collection) {
         if (m_p_rx_comp_event_channel) {
-            g_p_fd_collection->del_cq_channel_fd(m_p_rx_comp_event_channel->fd, true);
+            g_p_fd_collection->del_cq_channel_fd(get_rx_channel_fd_helper(m_p_rx_comp_event_channel),
+                                                 true);
         }
         if (m_p_tx_comp_event_channel) {
-            g_p_fd_collection->del_cq_channel_fd(m_p_tx_comp_event_channel->fd, true);
+            g_p_fd_collection->del_cq_channel_fd(get_tx_channel_fd(), true);
         }
     }
 
-    if (m_p_rx_comp_event_channel) {
-        IF_VERBS_FAILURE(ibv_destroy_comp_channel(m_p_rx_comp_event_channel))
-        {
-            ring_logdbg("destroy comp channel failed (errno=%d %m)", errno);
-        }
-        ENDIF_VERBS_FAILURE;
-        VALGRIND_MAKE_MEM_UNDEFINED(m_p_rx_comp_event_channel, sizeof(struct ibv_comp_channel));
-    }
+    delete m_p_rx_comp_event_channel;
+    m_p_rx_comp_event_channel = nullptr;
 
     delete[] m_p_n_rx_channel_fds;
 
@@ -171,16 +165,8 @@ ring_simple::~ring_simple()
                  m_missing_buf_ref_count));
     ring_logdbg("Rx buffer pool: %lu free global buffers available", m_tx_pool.size());
 
-    // Release verbs resources
-    if (m_p_tx_comp_event_channel) {
-        IF_VERBS_FAILURE(ibv_destroy_comp_channel(m_p_tx_comp_event_channel))
-        {
-            ring_logdbg("destroy comp channel failed (errno=%d %m)", errno);
-        }
-        ENDIF_VERBS_FAILURE;
-        VALGRIND_MAKE_MEM_UNDEFINED(m_p_tx_comp_event_channel, sizeof(struct ibv_comp_channel));
-        m_p_tx_comp_event_channel = nullptr;
-    }
+    delete m_p_tx_comp_event_channel;
+    m_p_tx_comp_event_channel = nullptr;
 
     /* coverity[double_unlock] TODO: RM#1049980 */
     m_lock_ring_tx.unlock();
@@ -205,22 +191,23 @@ void ring_simple::create_resources()
     }
 
     save_l2_address(p_slave->p_L2_addr);
-    m_p_tx_comp_event_channel = ibv_create_comp_channel(m_p_ib_ctx->get_ibv_context());
-    BULLSEYE_EXCLUDE_BLOCK_START
-    if (!m_p_tx_comp_event_channel) {
-        VLOG_PRINTF_INFO_ONCE_THEN_ALWAYS(
-            VLOG_ERROR, VLOG_DEBUG,
-            "ibv_create_comp_channel for tx failed. m_p_tx_comp_event_channel = %p (errno=%d %m)",
-            m_p_tx_comp_event_channel, errno);
-        if (errno == EMFILE) {
-            VLOG_PRINTF_INFO_ONCE_THEN_ALWAYS(VLOG_ERROR, VLOG_DEBUG,
-                                              "did we run out of file descriptors? traffic may not "
-                                              "be offloaded, increase ulimit -n");
+    {
+        dpcp::adapter *adapter = m_p_ib_ctx->get_dpcp_adapter();
+        if (!adapter ||
+            adapter->create_comp_channel(m_p_tx_comp_event_channel) != dpcp::DPCP_OK ||
+            !m_p_tx_comp_event_channel) {
+            VLOG_PRINTF_INFO_ONCE_THEN_ALWAYS(
+                VLOG_ERROR, VLOG_DEBUG,
+                "create_comp_channel for tx failed (errno=%d %m)", errno);
+            if (errno == EMFILE) {
+                VLOG_PRINTF_INFO_ONCE_THEN_ALWAYS(
+                    VLOG_ERROR, VLOG_DEBUG,
+                    "did we run out of file descriptors? traffic may not "
+                    "be offloaded, increase ulimit -n");
+            }
+            throw_xlio_exception("create event channel failed");
         }
-        throw_xlio_exception("create event channel failed");
     }
-    BULLSEYE_EXCLUDE_BLOCK_END
-    VALGRIND_MAKE_MEM_DEFINED(m_p_tx_comp_event_channel, sizeof(struct ibv_comp_channel));
     // Check device capabilities for max QP work requests
 
     m_tx_num_wr = safe_mce_sys().tx_num_wr;
@@ -318,29 +305,30 @@ void ring_simple::create_resources()
 #endif
     ring_logdbg("ring attributes: m_flow_tag_enabled = %d", m_flow_tag_enabled);
 
-    m_p_rx_comp_event_channel = ibv_create_comp_channel(m_p_ib_ctx->get_ibv_context());
-    BULLSEYE_EXCLUDE_BLOCK_START
-    if (!m_p_rx_comp_event_channel) {
-        VLOG_PRINTF_INFO_ONCE_THEN_ALWAYS(
-            VLOG_ERROR, VLOG_DEBUG,
-            "ibv_create_comp_channel for rx failed. p_rx_comp_event_channel = %p (errno=%d %m)",
-            m_p_rx_comp_event_channel, errno);
-        if (errno == EMFILE) {
-            VLOG_PRINTF_INFO_ONCE_THEN_ALWAYS(VLOG_ERROR, VLOG_DEBUG,
-                                              "did we run out of file descriptors? traffic may not "
-                                              "be offloaded, increase ulimit -n");
+    {
+        dpcp::adapter *adapter = m_p_ib_ctx->get_dpcp_adapter();
+        if (!adapter ||
+            adapter->create_comp_channel(m_p_rx_comp_event_channel) != dpcp::DPCP_OK ||
+            !m_p_rx_comp_event_channel) {
+            VLOG_PRINTF_INFO_ONCE_THEN_ALWAYS(
+                VLOG_ERROR, VLOG_DEBUG,
+                "create_comp_channel for rx failed (errno=%d %m)", errno);
+            if (errno == EMFILE) {
+                VLOG_PRINTF_INFO_ONCE_THEN_ALWAYS(
+                    VLOG_ERROR, VLOG_DEBUG,
+                    "did we run out of file descriptors? traffic may not "
+                    "be offloaded, increase ulimit -n");
+            }
+            throw_xlio_exception("create event channel failed");
         }
-        throw_xlio_exception("create event channel failed");
     }
-    BULLSEYE_EXCLUDE_BLOCK_END
-    VALGRIND_MAKE_MEM_DEFINED(m_p_rx_comp_event_channel, sizeof(struct ibv_comp_channel));
+    int rx_channel_fd = get_rx_channel_fd_helper(m_p_rx_comp_event_channel);
+    int tx_channel_fd = get_tx_channel_fd();
     m_p_n_rx_channel_fds = new int[1];
-    m_p_n_rx_channel_fds[0] = m_p_rx_comp_event_channel->fd;
-    // Add the rx channel fd to the global fd collection
+    m_p_n_rx_channel_fds[0] = rx_channel_fd;
     if (g_p_fd_collection) {
-        // Create new cq_channel info in the global fd collection
         g_p_fd_collection->add_cq_channel_fd(m_p_n_rx_channel_fds[0], this);
-        g_p_fd_collection->add_cq_channel_fd(m_p_tx_comp_event_channel->fd, this);
+        g_p_fd_collection->add_cq_channel_fd(tx_channel_fd, this);
     }
 
     std::unique_ptr<hw_queue_tx> temp_hqtx(new hw_queue_tx(this, p_slave, get_tx_num_wr()));
@@ -532,7 +520,7 @@ mem_buf_desc_t *ring_simple::mem_buf_tx_get(ring_user_id_t id, bool b_block, pbu
                     // prepare to block
                     // CQ is armed, block on the CQ's Tx event channel (fd)
                     struct pollfd poll_fd = {/*.fd=*/0, /*.events=*/POLLIN, /*.revents=*/0};
-                    poll_fd.fd = get_tx_comp_event_channel()->fd;
+                    poll_fd.fd = get_tx_channel_fd();
 
                     // Now it is time to release the ring lock (for restart events to be handled
                     // while this thread block on CQ channel)
@@ -558,7 +546,8 @@ mem_buf_desc_t *ring_simple::mem_buf_tx_get(ring_user_id_t id, bool b_block, pbu
                     // It might not be the active_cq object since we have a single TX CQ comp
                     // channel for all cq_mgr_tx's
                     cq_mgr_tx *p_cq_mgr_tx =
-                        cq_mgr_tx::get_cq_mgr_from_cq_event(get_tx_comp_event_channel());
+                        cq_mgr_tx::get_cq_mgr_from_cq_event(get_tx_comp_event_channel(),
+                                                             m_p_cq_mgr_tx->get_cq());
                     if (p_cq_mgr_tx) {
 
                         // Allow additional CQ arming now
@@ -698,7 +687,7 @@ bool ring_simple::is_available_qp_wr(bool b_block, unsigned credits)
                 // prepare to block
                 // CQ is armed, block on the CQ's Tx event channel (fd)
                 struct pollfd poll_fd = {/*.fd=*/0, /*.events=*/POLLIN, /*.revents=*/0};
-                poll_fd.fd = get_tx_comp_event_channel()->fd;
+                poll_fd.fd = get_tx_channel_fd();
 
                 // Now it is time to release the ring lock (for restart events to be handled
                 // while this thread block on CQ channel)
@@ -721,7 +710,8 @@ bool ring_simple::is_available_qp_wr(bool b_block, unsigned credits)
                 // It might not be the active_cq object since we have a single TX CQ comp
                 // channel for all cq_mgr_tx's
                 cq_mgr_tx *p_cq_mgr_tx =
-                    cq_mgr_tx::get_cq_mgr_from_cq_event(get_tx_comp_event_channel());
+                    cq_mgr_tx::get_cq_mgr_from_cq_event(get_tx_comp_event_channel(),
+                                                         m_p_cq_mgr_tx->get_cq());
                 if (p_cq_mgr_tx) {
 
                     // Allow additional CQ arming now
@@ -906,8 +896,10 @@ void ring_simple::modify_cq_moderation(uint32_t period, uint32_t count)
     m_p_ring_stat->n_rx_cq_moderation_period = period;
     m_p_ring_stat->n_rx_cq_moderation_count = count;
 
-    // todo all cqs or just active? what about HA?
-    priv_ibv_modify_cq_moderation(m_p_cq_mgr_rx->get_ibv_cq_hndl(), period, count);
+    // TODO Step 9: Migrate CQ moderation to dpcp API.
+    // priv_ibv_modify_cq_moderation requires ibv_cq* which is no longer available.
+    (void)period;
+    (void)count;
 }
 
 uint64_t ring_simple::get_rx_cq_out_of_buffer_drop()

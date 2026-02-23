@@ -7,6 +7,7 @@
 #ifndef CQ_MGR_TX_H
 #define CQ_MGR_TX_H
 
+#include <mellanox/dpcp.h>
 #include "dev/ib_ctx_handler.h"
 
 class hw_queue_tx;
@@ -15,16 +16,25 @@ class ring_simple;
 class cq_mgr_tx {
 public:
     cq_mgr_tx(ring_simple *p_ring, ib_ctx_handler *p_ib_ctx_handler, int cq_size,
-              ibv_comp_channel *p_comp_event_channel);
+              dpcp::comp_channel *p_comp_event_channel);
     ~cq_mgr_tx();
 
-    // Helper gunction to extract the cq_mgr_tx from the CQ event,
-    // Since we have a single TX CQ comp channel for all cq_mgr_tx's, it might not be the active_cq
-    // object
-    static cq_mgr_tx *get_cq_mgr_from_cq_event(struct ibv_comp_channel *p_cq_channel);
+    static cq_mgr_tx *get_cq_mgr_from_cq_event(dpcp::comp_channel *p_cq_channel,
+                                                 dpcp::cq *p_cq);
 
-    ibv_cq *get_ibv_cq_hndl() { return m_p_ibv_cq; }
-    int get_channel_fd() { return m_comp_event_channel->fd; }
+    dpcp::cq *get_cq() { return m_p_cq; }
+    uint32_t get_cqn();
+    int get_channel_fd()
+    {
+        if (!m_comp_event_channel) {
+            return -1;
+        }
+        event_channel *ch = nullptr;
+        if (m_comp_event_channel->get_comp_channel(ch) == dpcp::DPCP_OK && ch) {
+            return *ch;
+        }
+        return -1;
+    }
 
     void configure(int cq_size);
     void add_qp_tx(hw_queue_tx *hqtx_ptr);
@@ -56,9 +66,9 @@ private:
     xlio_ib_mlx5_cq_t m_mlx5_cq;
     ring_simple *m_p_ring;
     ib_ctx_handler *m_p_ib_ctx_handler;
-    ibv_comp_channel *m_comp_event_channel;
+    dpcp::comp_channel *m_comp_event_channel;
     hw_queue_tx *m_hqtx_ptr = nullptr;
-    struct ibv_cq *m_p_ibv_cq = nullptr;
+    dpcp::cq *m_p_cq = nullptr;
     bool m_b_notification_armed = false;
 };
 

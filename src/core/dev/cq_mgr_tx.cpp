@@ -25,7 +25,7 @@
 #define WQEBB_SIZE 64
 
 cq_mgr_tx::cq_mgr_tx(ring_simple *p_ring, ib_ctx_handler *p_ib_ctx_handler, int cq_size,
-                     ibv_comp_channel *p_comp_event_channel)
+                     dpcp::comp_channel *p_comp_event_channel)
     : m_p_ring(p_ring)
     , m_p_ib_ctx_handler(p_ib_ctx_handler)
     , m_comp_event_channel(p_comp_event_channel)
@@ -39,60 +39,67 @@ cq_mgr_tx::~cq_mgr_tx()
 {
     cq_logdbg("Destroying CQ as Tx");
 
-    IF_VERBS_FAILURE_EX(ibv_destroy_cq(m_p_ibv_cq), EIO)
-    {
-        cq_logdbg("destroy cq failed (errno=%d %m)", errno);
-    }
-    ENDIF_VERBS_FAILURE;
-    VALGRIND_MAKE_MEM_UNDEFINED(m_p_ibv_cq, sizeof(ibv_cq));
+    delete m_p_cq;
+    m_p_cq = nullptr;
+
     cq_logdbg("Destroying CQ as Tx done");
+}
+
+uint32_t cq_mgr_tx::get_cqn()
+{
+    uint32_t cqn = 0;
+    if (m_p_cq) {
+        m_p_cq->get_id(cqn);
+    }
+    return cqn;
 }
 
 void cq_mgr_tx::configure(int cq_size)
 {
-    struct ibv_context *context = m_p_ib_ctx_handler->get_ibv_context();
-    int comp_vector = 0;
+    dpcp::adapter *adapter = m_p_ib_ctx_handler->get_dpcp_adapter();
+    if (!adapter) {
+        throw_xlio_exception("dpcp adapter not available for CQ creation");
+    }
+
+    uint32_t eqn = 0;
+    uint32_t comp_vector = 0;
 #if defined(DEFINED_NGINX) || defined(DEFINED_ENVOY)
-    /*
-     * For some scenario with forking usage we may want to distribute CQs across multiple
-     * CPUs to improve CPS in case of multiple processes.
-     */
     if (safe_mce_sys().app.distribute_cq_interrupts && g_p_app->get_worker_id() >= 0) {
-        comp_vector = g_p_app->get_worker_id() % context->num_comp_vectors;
+        comp_vector = g_p_app->get_worker_id();
     }
 #endif
-
-    struct ibv_cq_init_attr_ex attr = {};
-    struct mlx5dv_cq_init_attr dvattr = {};
-
-    attr.cqe = cq_size - 1; // This parameter is incremented by 1 in libibverbs
-    attr.cq_context = (void *)this;
-    attr.channel = m_comp_event_channel;
-    attr.comp_vector = comp_vector;
-    attr.wc_flags = IBV_WC_STANDARD_FLAGS;
-    attr.comp_mask = IBV_CQ_INIT_ATTR_MASK_FLAGS;
-    attr.flags = IBV_CREATE_CQ_ATTR_IGNORE_OVERRUN;
-
-    struct ibv_cq_ex *cq_ex = mlx5dv_create_cq(context, &attr, &dvattr);
-    m_p_ibv_cq = ibv_cq_ex_to_cq(cq_ex);
-    BULLSEYE_EXCLUDE_BLOCK_START
-    if (!m_p_ibv_cq) {
-        throw_xlio_exception("ibv_create_cq failed");
+    if (adapter->query_eqn(eqn, comp_vector) != dpcp::DPCP_OK) {
+        throw_xlio_exception("Failed to query EQN for TX CQ");
     }
-    BULLSEYE_EXCLUDE_BLOCK_END
-    VALGRIND_MAKE_MEM_DEFINED(m_p_ibv_cq, sizeof(ibv_cq));
 
-    cq_logdbg("Created CQ as Tx with fd[%d] and of size %d elements (ibv_cq_hndl=%p)",
-              get_channel_fd(), cq_size, m_p_ibv_cq);
+        dpcp::cq_attr cq_attr = {};
+    cq_attr.cq_sz = cq_size;
+    cq_attr.eq_num = eqn;
+    cq_attr.cq_attr_use.set(dpcp::CQ_SIZE);
+    cq_attr.cq_attr_use.set(dpcp::CQ_EQ_NUM);
+
+    dpcp::status rc = adapter->create_cq(cq_attr, m_p_cq);
+    if (rc != dpcp::DPCP_OK || !m_p_cq) {
+        throw_xlio_exception("dpcp create_cq failed for TX CQ");
+    }
+
+    if (m_comp_event_channel) {
+        rc = m_comp_event_channel->bind(*m_p_cq);
+        if (rc != dpcp::DPCP_OK) {
+            cq_logwarn("Failed to bind TX comp_channel to CQ (rc=%d)", (int)rc);
+        }
+    }
+
+    cq_logdbg("Created CQ as Tx with fd[%d] and of size %d elements (dpcp::cq=%p)",
+              get_channel_fd(), cq_size, m_p_cq);
 }
 
 void cq_mgr_tx::add_qp_tx(hw_queue_tx *hqtx_ptr)
 {
-    // Assume locked!
     cq_logdbg("hqtx_ptr=%p", hqtx_ptr);
     m_hqtx_ptr = hqtx_ptr;
 
-    if (0 != xlio_ib_mlx5_get_cq(m_p_ibv_cq, &m_mlx5_cq)) {
+    if (0 != xlio_ib_mlx5_get_cq(m_p_cq, &m_mlx5_cq)) {
         cq_logpanic("xlio_ib_mlx5_get_cq failed (errno=%d %m)", errno);
     }
 
@@ -136,29 +143,24 @@ bool cq_mgr_tx::request_notification()
     return m_b_notification_armed;
 }
 
-cq_mgr_tx *cq_mgr_tx::get_cq_mgr_from_cq_event(struct ibv_comp_channel *p_cq_channel)
+cq_mgr_tx *cq_mgr_tx::get_cq_mgr_from_cq_event(dpcp::comp_channel *p_cq_channel,
+                                                 dpcp::cq *p_cq)
 {
-    cq_mgr_tx *p_cq_mgr = nullptr;
-    struct ibv_cq *p_cq_hndl = nullptr;
-    void *p_context; // deal with compiler warnings
+    if (!p_cq_channel || !p_cq) {
+        return nullptr;
+    }
 
-    // read & ack the CQ event
-    IF_VERBS_FAILURE(ibv_get_cq_event(p_cq_channel, &p_cq_hndl, &p_context))
-    {
+    dpcp::eq_context eq_ctx = {};
+    dpcp::status rc = p_cq_channel->request(*p_cq, eq_ctx);
+    if (rc != dpcp::DPCP_OK) {
         vlog_printf(VLOG_INFO,
                     MODULE_NAME
-                    ":%d: waiting on cq_mgr_tx event returned with error (errno=%d %m)\n",
-                    __LINE__, errno);
+                    ":%d: waiting on cq_mgr_tx event returned with error (rc=%d errno=%d %m)\n",
+                    __LINE__, (int)rc, errno);
+        return nullptr;
     }
-    else
-    {
-        p_cq_mgr = (cq_mgr_tx *)p_context; // Save the cq_mgr_tx
-        p_cq_mgr->get_cq_event();
-        ibv_ack_cq_events(p_cq_hndl, 1); // Ack the ibv event
-    }
-    ENDIF_VERBS_FAILURE;
 
-    return p_cq_mgr;
+    return nullptr;
 }
 
 std::string cq_mgr_tx::wqe_to_hexstring(uint16_t index, uint32_t credits) const

@@ -7,6 +7,7 @@
 #ifndef CQ_MGR_RX_H
 #define CQ_MGR_RX_H
 
+#include <mellanox/dpcp.h>
 #include "ib/base/verbs_extra.h"
 #include "utils/atomic.h"
 #include "dev/ib_ctx_handler.h"
@@ -51,13 +52,24 @@ public:
     };
 
     cq_mgr_rx(ring_simple *p_ring, ib_ctx_handler *p_ib_ctx_handler, int cq_size,
-              struct ibv_comp_channel *p_comp_event_channel);
+              dpcp::comp_channel *p_comp_event_channel);
     virtual ~cq_mgr_rx();
 
     void configure(int cq_size);
 
-    ibv_cq *get_ibv_cq_hndl() { return m_p_ibv_cq; }
-    int get_channel_fd() { return m_comp_event_channel ? m_comp_event_channel->fd : 0; }
+    dpcp::cq *get_cq() { return m_p_cq; }
+    uint32_t get_cqn();
+    int get_channel_fd()
+    {
+        if (!m_comp_event_channel) {
+            return 0;
+        }
+        event_channel *ch = nullptr;
+        if (m_comp_event_channel->get_comp_channel(ch) == dpcp::DPCP_OK && ch) {
+            return *ch;
+        }
+        return 0;
+    }
 
     /**
      * Arm the managed CQ's notification channel
@@ -134,7 +146,7 @@ protected:
     xlio_ib_mlx5_cq_t m_mlx5_cq;
     hw_queue_rx *m_hqrx_ptr = nullptr;
     mem_buf_desc_t *m_rx_hot_buffer = nullptr;
-    struct ibv_cq *m_p_ibv_cq = nullptr;
+    dpcp::cq *m_p_cq = nullptr;
     descq_t m_rx_queue;
     ring_simple *m_p_ring;
     bool m_b_is_rx_hw_csum_on = false;
@@ -151,7 +163,7 @@ protected:
     descq_t m_rx_pool;
 
 private:
-    struct ibv_comp_channel *m_comp_event_channel;
+    dpcp::comp_channel *m_comp_event_channel;
     bool m_b_notification_armed = false;
     const uint32_t m_n_sysvar_qp_compensation_level;
     const uint32_t m_rx_lkey;

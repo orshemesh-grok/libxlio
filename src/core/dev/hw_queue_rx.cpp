@@ -28,7 +28,7 @@
 #define ALIGN_WR_DOWN(_num_wr_) (std::max(32, ((_num_wr_) & ~(0xf))))
 
 hw_queue_rx::hw_queue_rx(ring_simple *ring, ib_ctx_handler *ib_ctx,
-                         ibv_comp_channel *rx_comp_event_channel, uint16_t vlan)
+                         dpcp::comp_channel *rx_comp_event_channel, uint16_t vlan)
     : m_p_ring(ring)
     , m_p_ib_ctx_handler(ib_ctx)
     , m_n_sysvar_rx_num_wr_to_post_recv(safe_mce_sys().rx_num_wr_to_post_recv)
@@ -69,9 +69,8 @@ hw_queue_rx::~hw_queue_rx()
                  g_buffer_pool_rx_rwqe->get_free_count());
 }
 
-bool hw_queue_rx::configure_rq(ibv_comp_channel *rx_comp_event_channel)
+bool hw_queue_rx::configure_rq(dpcp::comp_channel *rx_comp_event_channel)
 {
-    // Create associated cq_mgr_tx
     BULLSEYE_EXCLUDE_BLOCK_START
     m_p_cq_mgr_rx = init_rx_cq_mgr(rx_comp_event_channel);
     if (!m_p_cq_mgr_rx) {
@@ -80,22 +79,16 @@ bool hw_queue_rx::configure_rq(ibv_comp_channel *rx_comp_event_channel)
     }
     BULLSEYE_EXCLUDE_BLOCK_END
 
-    // Modify the cq_mgr_rx to use a non-blocking event channel
     set_fd_block_mode(m_p_cq_mgr_rx->get_channel_fd(), false);
 
     m_curr_rx_wr = 0;
 
-    xlio_ib_mlx5_cq_t mlx5_cq;
-    memset(&mlx5_cq, 0, sizeof(mlx5_cq));
-    if (unlikely(xlio_ib_mlx5_get_cq(m_p_cq_mgr_rx->get_ibv_cq_hndl(), &mlx5_cq) != 0)) {
-        hwqrx_logwarn("Failed to get CQ (errno=%d %m)", errno);
-    } else {
-        hwqrx_logdbg("Creating RQ of transport type '%s' on ibv device '%s' [%p], cq: %p(%u), wre: "
-                     "%d, sge: %d",
-                     priv_xlio_transport_type_str(m_p_ring->get_transport_type()),
-                     m_p_ib_ctx_handler->get_ibname(), m_p_ib_ctx_handler->get_ibv_device(),
-                     m_p_cq_mgr_rx, mlx5_cq.cq_num, m_rx_num_wr, m_rx_sge);
-    }
+    uint32_t cqn = m_p_cq_mgr_rx->get_cqn();
+    hwqrx_logdbg("Creating RQ of transport type '%s' on ibv device '%s' [%p], cq: %p(%u), wre: "
+                 "%d, sge: %d",
+                 priv_xlio_transport_type_str(m_p_ring->get_transport_type()),
+                 m_p_ib_ctx_handler->get_ibname(), m_p_ib_ctx_handler->get_ibv_device(),
+                 m_p_cq_mgr_rx, cqn, m_rx_num_wr, m_rx_sge);
     if (safe_mce_sys().enable_striding_rq) {
         m_rx_sge = 2U; // Striding-RQ needs a reserved segment.
         m_strq_wqe_reserved_seg = 1U;
@@ -120,8 +113,7 @@ bool hw_queue_rx::configure_rq(ibv_comp_channel *rx_comp_event_channel)
         }
     }
 
-    // Create the QP
-    if (!prepare_rq(mlx5_cq.cq_num)) {
+    if (!prepare_rq(cqn)) {
         return false;
     }
 
@@ -392,7 +384,7 @@ bool hw_queue_rx::init_rx_cq_mgr_prepare()
     return true;
 }
 
-cq_mgr_rx *hw_queue_rx::init_rx_cq_mgr(struct ibv_comp_channel *p_rx_comp_event_channel)
+cq_mgr_rx *hw_queue_rx::init_rx_cq_mgr(dpcp::comp_channel *p_rx_comp_event_channel)
 {
     if (!init_rx_cq_mgr_prepare()) {
         return nullptr;

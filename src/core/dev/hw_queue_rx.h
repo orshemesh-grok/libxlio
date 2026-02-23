@@ -26,7 +26,7 @@ class hw_queue_rx : public xlio_ti_owner {
     friend class cq_mgr_rx_strq;
 
 public:
-    hw_queue_rx(ring_simple *ring, ib_ctx_handler *ib_ctx, ibv_comp_channel *rx_comp_event_channel,
+    hw_queue_rx(ring_simple *ring, ib_ctx_handler *ib_ctx, dpcp::comp_channel *rx_comp_event_channel,
                 uint16_t vlan);
     virtual ~hw_queue_rx();
 
@@ -57,13 +57,13 @@ public:
 #endif /* DEFINED_UTLS */
 
 private:
-    cq_mgr_rx *init_rx_cq_mgr(struct ibv_comp_channel *p_rx_comp_event_channel);
+    cq_mgr_rx *init_rx_cq_mgr(dpcp::comp_channel *p_rx_comp_event_channel);
 
     bool init_rx_cq_mgr_prepare();
     void post_recv_buffer_rq(mem_buf_desc_t *p_mem_buf_desc);
     void put_tls_tir_in_cache(xlio_tir *tir);
     bool prepare_rq(uint32_t cqn);
-    bool configure_rq(ibv_comp_channel *rx_comp_event_channel);
+    bool configure_rq(dpcp::comp_channel *rx_comp_event_channel);
     bool store_rq_mlx5_params(dpcp::basic_rq &new_rq);
     int xlio_raw_post_recv(struct ibv_recv_wr **bad_wr);
     bool is_rq_empty() const { return (m_rq_data.head == m_rq_data.tail); }

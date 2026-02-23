@@ -10,6 +10,7 @@
 #if defined(DEFINED_DIRECT_VERBS)
 
 #include <infiniband/verbs.h>
+#include <mellanox/dpcp.h>
 
 #if (DEFINED_DIRECT_VERBS == 3)
 extern "C" {
@@ -41,9 +42,8 @@ int xlio_ib_mlx5dv_init_obj(struct mlx5dv_obj *obj, uint64_t type);
 
 enum { XLIO_IB_MLX5_CQ_SET_CI = 0, XLIO_IB_MLX5_CQ_ARM_DB = 1 };
 
-/* Queue pair */
+/* Send Queue */
 typedef struct xlio_ib_mlx5_qp {
-    struct ibv_qp *qp;
     uint32_t qpn;
     struct ibv_qp_cap cap;
     struct {
@@ -61,7 +61,6 @@ typedef struct xlio_ib_mlx5_qp {
 
 /* Completion queue */
 typedef struct xlio_ib_mlx5_cq {
-    struct ibv_cq *cq;
     void *cq_buf;
     unsigned cq_num;
     unsigned cq_ci;
@@ -71,6 +70,7 @@ typedef struct xlio_ib_mlx5_cq {
     unsigned cqe_size_log;
     volatile uint32_t *dbrec;
     void *uar;
+    bool initialized;
 } xlio_ib_mlx5_cq_t;
 
 /* TLS PRM structures */
@@ -441,11 +441,11 @@ enum {
 /*
  * Interfaces
  */
-int xlio_ib_mlx5_get_qp_tx(xlio_ib_mlx5_qp_t *mlx5_qp);
+int xlio_ib_mlx5_get_qp_tx(dpcp::pp_sq *sq, xlio_ib_mlx5_qp_t *mlx5_qp);
 int xlio_ib_mlx5_post_recv(xlio_ib_mlx5_qp_t *mlx5_qp, struct ibv_recv_wr *wr,
                            struct ibv_recv_wr **bad_wr);
 
-int xlio_ib_mlx5_get_cq(struct ibv_cq *cq, xlio_ib_mlx5_cq_t *mlx5_cq);
+int xlio_ib_mlx5_get_cq(dpcp::cq *cq, xlio_ib_mlx5_cq_t *mlx5_cq);
 int xlio_ib_mlx5_req_notify_cq(xlio_ib_mlx5_cq_t *mlx5_cq, int solicited);
 void xlio_ib_mlx5_get_cq_event(xlio_ib_mlx5_cq_t *mlx5_cq, int count);
 

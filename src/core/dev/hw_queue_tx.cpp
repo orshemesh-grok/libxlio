@@ -9,7 +9,6 @@
 #include <netinet/ip.h>
 #include "dev/hw_queue_tx.h"
 #include "dev/ring_simple.h"
-#include "dev/cq_mgr_rx_regrq.h"
 #include "proto/tls.h"
 #include "util/valgrind.h"
 
@@ -128,25 +127,15 @@ hw_queue_tx::~hw_queue_tx()
 
     destroy_tis_cache();
 
-    hwqtx_logdbg("calling ibv_destroy_qp(qp=%p)", m_mlx5_qp.qp);
-    if (m_mlx5_qp.qp) {
-        IF_VERBS_FAILURE_EX(ibv_destroy_qp(m_mlx5_qp.qp), EIO)
-        {
-            hwqtx_logdbg("QP destroy failure (errno = %d %m)", -errno);
-        }
-        ENDIF_VERBS_FAILURE;
-        VALGRIND_MAKE_MEM_UNDEFINED(m_mlx5_qp.qp, sizeof(ibv_qp));
-        m_mlx5_qp.qp = nullptr;
-    }
+    hwqtx_logdbg("destroying dpcp pp_sq (sqn=%u)", m_mlx5_qp.qpn);
+    delete m_p_sq;
+    m_p_sq = nullptr;
+
+    m_default_tis.reset();
 
     if (m_p_cq_mgr_tx) {
         delete m_p_cq_mgr_tx;
         m_p_cq_mgr_tx = nullptr;
-    }
-
-    if (m_p_cq_mgr_rx_unused) {
-        delete m_p_cq_mgr_rx_unused;
-        m_p_cq_mgr_rx_unused = nullptr;
     }
 
     hwqtx_logdbg("Destructor hw_queue_tx end");
@@ -159,110 +148,36 @@ int hw_queue_tx::configure(const slave_data_t *slave)
                  m_p_ib_ctx_handler->get_ibname(), m_p_ib_ctx_handler->get_ibv_device(),
                  m_port_num);
 
-    // Create associated cq_mgr_tx and unused cq_mgr_rx_regrq just for QP sake.
+    // Create associated cq_mgr_tx for the SQ.
     BULLSEYE_EXCLUDE_BLOCK_START
     m_p_cq_mgr_tx = init_tx_cq_mgr();
     if (!m_p_cq_mgr_tx) {
         hwqtx_logerr("Failed allocating m_p_cq_mgr_tx (errno=%d %m)", errno);
         return -1;
     }
-    m_p_cq_mgr_rx_unused = new cq_mgr_rx_regrq(m_p_ring, m_p_ib_ctx_handler, 2, nullptr);
-    if (!m_p_cq_mgr_rx_unused) {
-        hwqtx_logerr("Failed allocating m_p_cq_mgr_rx_unused (errno=%d %m)", errno);
-        return -1;
-    }
     BULLSEYE_EXCLUDE_BLOCK_END
 
-    // Modify the cq_mgr_tx to use a non-blocking event channel
     set_fd_block_mode(m_p_cq_mgr_tx->get_channel_fd(), false);
     hwqtx_logdbg("cq tx: %p", m_p_cq_mgr_tx);
 
-    // Create QP
-    xlio_ibv_qp_init_attr qp_init_attr;
-    memset(&qp_init_attr, 0, sizeof(qp_init_attr));
-
-    // TODO: m_tx_num_wr and m_rx_num_wr should be part of m_mlx5_qp.cap
-    // and assigned as a result of ibv_query_qp()
     m_mlx5_qp.cap.max_send_wr = m_tx_num_wr;
-    m_mlx5_qp.cap.max_recv_wr = 1;
-    m_mlx5_qp.cap.max_recv_sge = 1;
 
-    memcpy(&qp_init_attr.cap, &m_mlx5_qp.cap, sizeof(qp_init_attr.cap));
-    qp_init_attr.recv_cq = m_p_cq_mgr_rx_unused->get_ibv_cq_hndl();
-    qp_init_attr.send_cq = m_p_cq_mgr_tx->get_ibv_cq_hndl();
-    qp_init_attr.sq_sig_all = 0;
-
-    // In case of enabled TSO we need to take into account amount of SGE together with header inline
-    // Per PRM maximum of CTRL + ETH + ETH_HEADER_INLINE+DATA_PTR*NUM_SGE+MAX_INLINE+INLINE_SIZE
-    // Converting WQEBBs to WQEs for ibv_create_qp API.
-    int max_wqe_sz =
-        16 + 14 + 16 * qp_init_attr.cap.max_send_sge + qp_init_attr.cap.max_inline_data + 4;
-    max_wqe_sz += (m_p_ring->is_tso() ? m_p_ring->m_tso.max_header_sz : 94);
-    int num_wr = m_p_ib_ctx_handler->get_max_sq_wqebbs() * 64 / max_wqe_sz;
-    hwqtx_logdbg("calculated max_wqe_sz=%d num_wr=%d, m_tx_num_wr=%u", max_wqe_sz, num_wr,
-                 m_tx_num_wr);
-    if (num_wr < (signed)m_tx_num_wr) {
-        qp_init_attr.cap.max_send_wr =
-            num_wr; // force min for create_qp or you will have error of memory allocation
-    }
-
-    hwqtx_logdbg("Requested QP parameters: wre: tx = %d sge: tx = %d inline: %d",
-                 qp_init_attr.cap.max_send_wr, qp_init_attr.cap.max_send_sge,
-                 qp_init_attr.cap.max_inline_data);
-
-    // Create the HW Queue
-    if (prepare_queue(qp_init_attr)) {
+    if (prepare_queue()) {
         return -1;
     }
 
-    hwqtx_logdbg("Configured QP parameters: wre: tx = %d sge: tx = %d inline: %d",
-                 qp_init_attr.cap.max_send_wr, qp_init_attr.cap.max_send_sge,
-                 qp_init_attr.cap.max_inline_data);
-
-    /* Check initial parameters with actual */
-    enum ibv_qp_attr_mask attr_mask = IBV_QP_CAP;
-    struct ibv_qp_attr tmp_ibv_qp_attr;
-    struct ibv_qp_init_attr tmp_ibv_qp_init_attr;
-    IF_VERBS_FAILURE(ibv_query_qp(m_mlx5_qp.qp, &tmp_ibv_qp_attr, attr_mask, &tmp_ibv_qp_init_attr))
-    {
-        hwqtx_logerr("ibv_query_qp failed (errno=%d %m)", errno);
-        return -1;
+    uint32_t sqn = 0;
+    if (m_p_sq) {
+        m_p_sq->get_id(sqn);
     }
-    ENDIF_VERBS_FAILURE;
-    m_mlx5_qp.cap.max_send_wr =
-        std::min(tmp_ibv_qp_attr.cap.max_send_wr, m_mlx5_qp.cap.max_send_wr);
-    m_mlx5_qp.cap.max_send_sge =
-        std::min(tmp_ibv_qp_attr.cap.max_send_sge, m_mlx5_qp.cap.max_send_sge);
-    m_mlx5_qp.cap.max_inline_data =
-        std::min(tmp_ibv_qp_attr.cap.max_inline_data, m_mlx5_qp.cap.max_inline_data);
-
-    hwqtx_logdbg("Used QP (num=%d) wre: tx = %d sge: tx = %d inline: %d", m_mlx5_qp.qp->qp_num,
-                 m_mlx5_qp.cap.max_send_wr, m_mlx5_qp.cap.max_send_sge,
-                 m_mlx5_qp.cap.max_inline_data);
+    hwqtx_logdbg("Used SQ (sqn=%u) wre: tx = %d", sqn, m_mlx5_qp.cap.max_send_wr);
 
 #if defined(DEFINED_ROCE_LAG)
-    if (slave && slave->lag_tx_port_affinity > 0) {
-        struct mlx5dv_context attr_out;
-
-        memset(&attr_out, 0, sizeof(attr_out));
-        attr_out.comp_mask |= MLX5DV_CONTEXT_MASK_NUM_LAG_PORTS;
-        if (!mlx5dv_query_device(slave->p_ib_ctx->get_ibv_context(), &attr_out)) {
-            hwqtx_logdbg("QP ROCE LAG port: %d of %d", slave->lag_tx_port_affinity,
-                         attr_out.num_lag_ports);
-
-            if (!mlx5dv_modify_qp_lag_port(m_mlx5_qp.qp, slave->lag_tx_port_affinity)) {
-                uint8_t current_port_num = 0;
-                uint8_t active_port_num = 0;
-
-                if (!mlx5dv_query_qp_lag_port(m_mlx5_qp.qp, &current_port_num, &active_port_num)) {
-                    hwqtx_logdbg("QP ROCE LAG port affinity: %d => %d", current_port_num,
-                                 active_port_num);
-                }
-            }
-        }
-    }
-#endif /* DEFINED_ROCE_LAG */
+    // TODO Step 6: Migrate ROCE LAG to dpcp. mlx5dv_modify_qp_lag_port requires ibv_qp*.
     NOT_IN_USE(slave);
+#else
+    NOT_IN_USE(slave);
+#endif /* DEFINED_ROCE_LAG */
     return 0;
 }
 
@@ -270,8 +185,7 @@ void hw_queue_tx::up()
 {
     init_queue();
 
-    // Add buffers
-    hwqtx_logdbg("QP current state: %d", priv_ibv_query_qp_state(m_mlx5_qp.qp));
+    hwqtx_logdbg("SQ sqn=%u", m_mlx5_qp.qpn);
 
     m_p_cq_mgr_tx->add_qp_tx(this);
 
@@ -288,7 +202,7 @@ void hw_queue_tx::down()
         m_dm_mgr.release_resources();
     }
 
-    hwqtx_logdbg("QP current state: %d", priv_ibv_query_qp_state(m_mlx5_qp.qp));
+    hwqtx_logdbg("SQ sqn=%u going to error state", m_mlx5_qp.qpn);
     modify_queue_to_error_state();
 
     // free buffers from current active resource iterator
@@ -305,7 +219,7 @@ void hw_queue_tx::down()
 void hw_queue_tx::release_tx_buffers()
 {
     hwqtx_logdbg("draining cq_mgr_tx %p", m_p_cq_mgr_tx);
-    while (m_p_cq_mgr_tx && m_mlx5_qp.qp && (m_p_cq_mgr_tx->poll_and_process_element_tx() > 0) &&
+    while (m_p_cq_mgr_tx && m_p_sq && (m_p_cq_mgr_tx->poll_and_process_element_tx() > 0) &&
            (errno != EIO && !m_p_ib_ctx_handler->is_removed())) {
         hwqtx_logdbg("draining completed on cq_mgr_tx");
     }
@@ -340,68 +254,80 @@ void hw_queue_tx::send_wqe(xlio_ibv_send_wr *p_send_wqe, xlio_wr_tx_packet_attr 
 void hw_queue_tx::modify_queue_to_ready_state()
 {
     hwqtx_logdbg("");
-    int ret = 0;
-    int qp_state = priv_ibv_query_qp_state(m_mlx5_qp.qp);
-    if (qp_state != IBV_QPS_INIT) {
-        BULLSEYE_EXCLUDE_BLOCK_START
-        if ((ret = priv_ibv_modify_qp_from_err_to_init_raw(m_mlx5_qp.qp, m_port_num)) != 0) {
-            hwqtx_logpanic("failed to modify QP from %d to RTS state (ret = %d)", qp_state, ret);
-        }
-        BULLSEYE_EXCLUDE_BLOCK_END
+    if (!m_p_sq) {
+        hwqtx_logpanic("SQ is null, cannot modify to ready state");
+        return;
     }
-
-    BULLSEYE_EXCLUDE_BLOCK_START
-    if ((ret = priv_ibv_modify_qp_from_init_to_rts(m_mlx5_qp.qp)) != 0) {
-        hwqtx_logpanic("failed to modify QP from INIT to RTS state (ret = %d)", ret);
+    dpcp::status rc = m_p_sq->modify_state(dpcp::SQ_RDY);
+    if (rc != dpcp::DPCP_OK) {
+        hwqtx_logpanic("failed to modify SQ to RDY state (rc=%d)", (int)rc);
     }
-
-    BULLSEYE_EXCLUDE_BLOCK_END
 }
 
 void hw_queue_tx::modify_queue_to_error_state()
 {
     hwqtx_logdbg("");
 
-    BULLSEYE_EXCLUDE_BLOCK_START
-    if (priv_ibv_modify_qp_to_err(m_mlx5_qp.qp)) {
-        hwqtx_logdbg("ibv_modify_qp failure (errno = %d %m)", errno);
+    if (m_p_sq) {
+        dpcp::status rc = m_p_sq->modify_state(dpcp::SQ_ERR);
+        if (rc != dpcp::DPCP_OK) {
+            hwqtx_logdbg("SQ modify_state to ERR failed (rc=%d)", (int)rc);
+        }
     }
-    BULLSEYE_EXCLUDE_BLOCK_END
 }
 
-int hw_queue_tx::prepare_queue(xlio_ibv_qp_init_attr &qp_init_attr)
+int hw_queue_tx::prepare_queue()
 {
     hwqtx_logdbg("");
-    int ret = 0;
 
-    qp_init_attr.qp_type = IBV_QPT_RAW_PACKET;
-    xlio_ibv_qp_init_attr_comp_mask(m_p_ib_ctx_handler->get_ibv_pd(), qp_init_attr);
-
-    if (m_p_ring->is_tso()) {
-        xlio_ibv_qp_init_attr_tso(qp_init_attr, m_p_ring->get_max_header_sz());
-        hwqtx_logdbg("create qp with max_tso_header = %d", m_p_ring->get_max_header_sz());
-    }
-
-    m_mlx5_qp.qp = xlio_ibv_create_qp(m_p_ib_ctx_handler->get_ibv_pd(), &qp_init_attr);
-
-    BULLSEYE_EXCLUDE_BLOCK_START
-    if (!m_mlx5_qp.qp) {
-        hwqtx_logerr("ibv_create_qp failed (errno=%d %m)", errno);
+    dpcp::adapter *adapter = m_p_ib_ctx_handler->get_dpcp_adapter();
+    if (!adapter) {
+        hwqtx_logerr("dpcp adapter not available for SQ creation");
         return -1;
     }
-    VALGRIND_MAKE_MEM_DEFINED(m_mlx5_qp.qp, sizeof(ibv_qp));
-    if ((ret = priv_ibv_modify_qp_from_err_to_init_raw(m_mlx5_qp.qp, m_port_num)) != 0) {
-        hwqtx_logerr("failed to modify QP from ERR to INIT state (ret = %d)", ret);
-        return ret;
+
+    uint32_t tis_num = 0;
+    if (!m_default_tis) {
+        m_default_tis = create_tis(0);
+        if (!m_default_tis) {
+            hwqtx_logerr("Failed to create default TIS for SQ");
+            return -1;
+        }
     }
-    BULLSEYE_EXCLUDE_BLOCK_END
+    tis_num = m_default_tis->get_tisn();
+
+    uint32_t tx_cqn = m_p_cq_mgr_tx->get_cqn();
+
+    // This is a dummy pp - 0 means no pacing
+    dpcp::qos_attributes qos_attr;
+    qos_attr.qos_type = dpcp::QOS_TYPE::QOS_PACKET_PACING;
+    qos_attr.qos_attr.packet_pacing_attr.sustained_rate = 1200000;
+    qos_attr.qos_attr.packet_pacing_attr.burst_sz = 1200000;
+    qos_attr.qos_attr.packet_pacing_attr.packet_sz = 1200;
+
+    dpcp::sq_attr sq_attr_cfg = {};
+    sq_attr_cfg.tis_num = tis_num;
+    sq_attr_cfg.cqn = tx_cqn;
+    sq_attr_cfg.wqe_num = m_mlx5_qp.cap.max_send_wr;
+    // Forced by HW to be 64 bytes
+    sq_attr_cfg.wqe_sz = WQEBB;
+    sq_attr_cfg.qos_attrs = &qos_attr;
+    sq_attr_cfg.qos_attrs_sz = 1;
+
+    dpcp::status rc = adapter->create_pp_sq(sq_attr_cfg, m_p_sq);
+    if (rc != dpcp::DPCP_OK || !m_p_sq) {
+        hwqtx_logerr("create_pp_sq failed (rc=%d, errno=%d %m)", (int)rc, errno);
+        return -1;
+    }
+
+    m_mlx5_qp.tisn = tis_num;
 
     return 0;
 }
 
 void hw_queue_tx::init_queue()
 {
-    if (0 != xlio_ib_mlx5_get_qp_tx(&m_mlx5_qp)) {
+    if (0 != xlio_ib_mlx5_get_qp_tx(m_p_sq, &m_mlx5_qp)) {
         hwqtx_logpanic("xlio_ib_mlx5_get_qp_tx failed (errno=%d %m)", errno);
     }
 
@@ -446,9 +372,9 @@ void hw_queue_tx::init_queue()
     hwqtx_logfunc("m_tx_num_wr=%d max_inline_data: %d m_sq_wqe_idx_to_prop=%p", m_tx_num_wr,
                   get_max_inline_data(), m_sq_wqe_idx_to_prop);
 
-    hwqtx_logfunc("%p allocated for %d QPs sq_wqes:%p sq_wqes_end: %p and configured %d WRs "
+    hwqtx_logfunc("SQ sqn=%u sq_wqes:%p sq_wqes_end: %p and configured %d WRs "
                   "BlueFlame: %p",
-                  m_mlx5_qp.qp, m_mlx5_qp.qpn, m_sq_wqes, m_sq_wqes_end, m_tx_num_wr,
+                  m_mlx5_qp.qpn, m_sq_wqes, m_sq_wqes_end, m_tx_num_wr,
                   m_mlx5_qp.bf.reg);
 }
 
@@ -824,7 +750,7 @@ std::unique_ptr<xlio_tis> hw_queue_tx::create_tis(uint32_t flags)
     }
 
     dpcp::tis::attr tis_attr = {
-        .flags = flags,
+        .flags = flags | dpcp::TIS_ATTR_TRANSPORT_DOMAIN | dpcp::TIS_ATTR_PD,
         .tls_en = is_tls,
         .nvmeotcp = is_nvme,
         .transport_domain = adapter->get_td(),
@@ -1366,14 +1292,10 @@ uint32_t hw_queue_tx::is_ratelimit_change(struct xlio_rate_limit_t &rate_limit)
 
 int hw_queue_tx::modify_qp_ratelimit(struct xlio_rate_limit_t &rate_limit, uint32_t rl_changes)
 {
-    int ret;
-
-    ret = priv_ibv_modify_qp_ratelimit(m_mlx5_qp.qp, rate_limit, rl_changes);
-    if (ret) {
-        hwqtx_logdbg("failed to modify qp ratelimit ret %d (errno=%d %m)", ret, errno);
-        return -1;
-    }
-
+    // TODO Step 6: Migrate rate limiting to dpcp. priv_ibv_modify_qp_ratelimit requires ibv_qp*.
+    // dpcp::pp_sq supports packet pacing via modify_rate, but the interface differs.
+    (void)rl_changes;
+    hwqtx_logdbg("rate limiting not yet migrated to dpcp (rate=%u)", rate_limit.rate);
     m_rate_limit = rate_limit;
     return 0;
 }

@@ -212,6 +212,8 @@ extern "C" int xlio_socket_create(const struct xlio_socket_attr *attr, xlio_sock
         return -1;
     }
     si->set_xlio_socket(attr);
+    // App just created this socket so surely it is aware of it.
+    si->set_xlio_app_callbacks_allowed();
 
     poll_group *grp = reinterpret_cast<poll_group *>(attr->group);
     grp->add_socket(si);

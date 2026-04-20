@@ -399,6 +399,8 @@ public:
     void xlio_socket_event(int event, int value);
     static err_t rx_lwip_cb_xlio_socket(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err);
     static void err_lwip_cb_xlio_socket(void *pcb_container, err_t err);
+    // Ultra-API: Specify that app is aware of this socket and callbacks can be called.
+    void set_xlio_app_callbacks_allowed() { m_xlio_app_callbacks_allowed = true; }
 
 protected:
     void lock_rx_q() override;
@@ -421,6 +423,8 @@ private:
     bool prepare_listen_to_close();
     void remove_received_syn_socket(sockinfo_tcp *accepted);
     void accept_connection_xlio_socket(sockinfo_tcp *new_sock);
+    // Ultra-API: Is app aware of this socket so we can callback on it?
+    bool is_xlio_app_callbacks_allowed() const { return m_xlio_app_callbacks_allowed; }
 
     // Builds rfs key
     static void create_flow_tuple_key_from_pcb(flow_tuple &key, struct tcp_pcb *pcb);
@@ -670,6 +674,10 @@ private:
     bool m_b_xlio_socket_dirty = false;
     uintptr_t m_xlio_socket_userdata = 0;
     rfs_rule *m_p_rule_extracted = nullptr;
+
+    // Ultra-API: When false, poll-group event/rx/comp callbacks are suppressed (Accepted child
+    // before accept_cb).
+    bool m_xlio_app_callbacks_allowed = false;
 
     mem_buf_desc_t *m_store = nullptr;
     uint32_t m_store_offset = 0;

@@ -656,11 +656,8 @@ void sockinfo_tcp::add_tx_ring_to_group()
 
 void sockinfo_tcp::xlio_socket_event(int event, int value)
 {
-    /* Before accept_cb on accepted children, suppress app events CBs:
-     * m_parent != nullptr means the socket is a "half-open" incoming connection
-     * that hasn't reached the application yet, so we can't notify the app yet.
-     */
-    if (is_xlio_socket() && !m_parent) {
+    // Before accept_cb on accepted children, suppress app events CBs
+    if (is_xlio_socket() && is_xlio_app_callbacks_allowed()) {
         /* poll_group::m_socket_event_cb must be always set. */
         m_p_group->m_socket_event_cb(reinterpret_cast<xlio_socket_t>(this), m_xlio_socket_userdata,
                                      event, value);
@@ -3654,6 +3651,7 @@ bool sockinfo_tcp::wait_for_listen_rss_children_ready()
 void sockinfo_tcp::accept_connection_xlio_socket(sockinfo_tcp *new_sock)
 {
     remove_received_syn_socket(new_sock);
+    new_sock->set_xlio_app_callbacks_allowed();
     m_p_group->m_socket_accept_cb(reinterpret_cast<xlio_socket_t>(new_sock),
                                   reinterpret_cast<xlio_socket_t>(this), m_xlio_socket_userdata);
 }
@@ -3920,6 +3918,7 @@ err_t sockinfo_tcp::syn_received_timewait_cb(void *arg, struct tcp_pcb *newpcb)
     new_sock->m_snd_buf = new_sock->m_snd_buf_max;
     new_sock->m_rcvbuff_max = std::max(listen_sock->m_rcvbuff_max, 2 * new_sock->m_pcb.mss);
     new_sock->fit_rcv_wnd(true);
+    new_sock->m_xlio_app_callbacks_allowed = false;
 
     new_sock->register_timer();
 

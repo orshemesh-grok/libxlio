@@ -179,6 +179,8 @@ extern "C" int xlio_poll_group_update(xlio_poll_group_t group,
     poll_group *grp = reinterpret_cast<poll_group *>(group);
 
     if (!attr || !attr->socket_event_cb) {
+        __log_dbg("xlio_poll_group_update: Invalid parameter, %s must not be null",
+                  attr ? "attr->socket_event_cb" : "attr");
         errno = EINVAL;
         return -1;
     }

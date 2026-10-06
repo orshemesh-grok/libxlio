@@ -1,0 +1,8 @@
+{
+  "monitor": {"log": {"level": 5}},
+  "performance": {
+    "threading": {"worker_threads": 0},
+    "polling": {"iomux": {"poll_usec": 0}},
+    "steering_rules": {"disable_flowtag": true}
+  }
+}

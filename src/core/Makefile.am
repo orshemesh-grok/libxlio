@@ -236,6 +236,7 @@ libxlio_la_SOURCES := \
 	dev/rfs_uc.h \
 	dev/rfs_uc_tcp_gro.h \
 	dev/rfs_rule.h \
+	dev/rx_header_layout.h \
 	dev/src_addr_selector.h \
 	dev/ring.h \
 	dev/ring_bond.h \

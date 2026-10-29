@@ -8,6 +8,7 @@
 #define RFS_RULE_H
 
 #include <memory>
+#include <vector>
 #include "ib/base/verbs_extra.h"
 #include <mellanox/dpcp.h>
 
@@ -17,6 +18,10 @@ public:
                 uint16_t priority, uint32_t flow_tag, dpcp::adapter &in_adapter);
 
 private:
+    bool create_headers_table(dpcp::tir &tir, uint32_t flow_tag, dpcp::adapter &adapter);
+    // Destruction order: root rule, private table (its FTE/group), then action objects.
+    std::vector<std::shared_ptr<dpcp::flow_action>> _headers_actions;
+    std::shared_ptr<dpcp::flow_table> _headers_table;
     std::unique_ptr<dpcp::flow_rule> _dpcp_flow;
 };
 

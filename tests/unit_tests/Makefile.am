@@ -84,6 +84,7 @@ unit_tests_CXXFLAGS = \
 
 # Tests
 unit_tests_SOURCES = \
+	dev/rx_header_layout.cpp \
 	main.cpp \
     config/config_registry.cpp \
 	config/config_descriptor.cpp \

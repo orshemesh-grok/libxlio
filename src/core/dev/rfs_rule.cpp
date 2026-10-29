@@ -7,6 +7,7 @@
 #include "dev/rfs_rule.h"
 
 #include <cinttypes>
+#include <algorithm>
 #include "dev/rfs.h"
 
 #define MODULE_NAME "rfs_rule"
@@ -76,7 +77,14 @@ bool rfs_rule::create(dpcp::match_params &match_value, dpcp::match_params &match
         return false;
     }
 
-    status_out = _dpcp_flow->add_dest_tir(&in_tir);
+    if (safe_mce_sys().headers_64) {
+        if (!create_headers_table(in_tir, flow_tag, in_adapter)) {
+            return false;
+        }
+        status_out = _dpcp_flow->set_dest_table(_headers_table.get());
+    } else {
+        status_out = _dpcp_flow->add_dest_tir(&in_tir);
+    }
     if (status_out != dpcp::DPCP_OK) {
         rfs_logerr("Failed dpcp_flow_rule::add_dest_tir(), Status: %d, dpcp_flow: %p",
                    static_cast<int>(status_out), new_rule);
@@ -107,5 +115,71 @@ bool rfs_rule::create(dpcp::match_params &match_value, dpcp::match_params &match
         return false;
     }
 
+    return true;
+}
+
+bool rfs_rule::create_headers_table(dpcp::tir &tir, uint32_t flow_tag, dpcp::adapter &adapter)
+{
+    dpcp::adapter_hca_capabilities caps {};
+    if (adapter.get_hca_capabilities(caps) != dpcp::DPCP_OK ||
+        !caps.flow_table_caps.receive.is_flow_table_supported ||
+        !caps.flow_table_caps.receive.is_flow_action_reformat_from_type_insert_supported ||
+        !caps.flow_table_caps.receive.is_flow_action_reparse_supported ||
+        caps.flow_table_caps.receive.max_flow_table_level < 2U) {
+        rfs_logerr("headers-64 requires NIC RX insert-header, reparse and flow-table support");
+        return false;
+    }
+
+    // Keep the established root matcher, including IPv6/VLAN/priority semantics.
+    // Only this flow's destination changes: root match -> insert/reparse -> original TIR.
+    dpcp::flow_table_attr table_attr;
+    table_attr.type = dpcp::FT_RX;
+    table_attr.level =
+        std::min<uint32_t>(caps.flow_table_caps.receive.max_flow_table_level - 1U, UINT8_MAX);
+    table_attr.log_size = 0; // One FTE, matching everything already selected by the root rule.
+    if (adapter.create_flow_table(table_attr, _headers_table) != dpcp::DPCP_OK || !_headers_table ||
+        _headers_table->create() != dpcp::DPCP_OK) {
+        rfs_logerr("headers-64 failed to create receive insertion table");
+        return false;
+    }
+
+    dpcp::flow_group_attr group_attr;
+    std::weak_ptr<dpcp::flow_group> group_ref;
+    if (_headers_table->add_flow_group(group_attr, group_ref) != dpcp::DPCP_OK ||
+        group_ref.expired() || group_ref.lock()->create() != dpcp::DPCP_OK) {
+        rfs_logerr("headers-64 failed to create receive insertion group");
+        return false;
+    }
+
+    // Insert QinQ headers immediately after destination/source MAC addresses.
+    // The original EtherType (and any original VLAN) stays after these eight bytes.
+    uint8_t vlan_tags[] = {0x88, 0xa8, 0, 0, 0x81, 0, 0, 0};
+    dpcp::flow_action_reformat_attr insert_attr {};
+    insert_attr.insert.type = dpcp::INSERT_HDR;
+    insert_attr.insert.start_hdr = dpcp::MAC_START;
+    insert_attr.insert.offset = 12;
+    insert_attr.insert.data_len = sizeof(vlan_tags);
+    insert_attr.insert.data = vlan_tags;
+    auto &generator = adapter.get_flow_action_generator();
+    _headers_actions = {generator.create_reformat(insert_attr), generator.create_reparse(),
+                        generator.create_fwd({&tir})};
+    if (flow_tag) {
+        _headers_actions.push_back(generator.create_tag(flow_tag));
+    }
+    for (const auto &action : _headers_actions) {
+        if (!action) {
+            rfs_logerr("headers-64 failed to allocate receive insertion action");
+            return false;
+        }
+    }
+    dpcp::flow_rule_attr_ex rule_attr;
+    rule_attr.actions = _headers_actions;
+    std::weak_ptr<dpcp::flow_rule_ex> rule;
+    if (group_ref.lock()->add_flow_rule(rule_attr, rule) != dpcp::DPCP_OK || rule.expired() ||
+        rule.lock()->create() != dpcp::DPCP_OK) {
+        rfs_logerr("headers-64 failed to install VLAN insertion/reparse/TIR action");
+        return false;
+    }
+    rfs_logdbg("headers-64: inserted 88a8:0000 / 8100:0000 before forwarding to TIR");
     return true;
 }

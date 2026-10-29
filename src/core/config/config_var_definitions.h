@@ -65,6 +65,7 @@ extern const config_var_info_t<uint32_t, int64_t> CONFIG_VAR_STRQ_NUM_STRIDES;
 extern const config_var_info_t<uint32_t, int64_t> CONFIG_VAR_STRQ_STRIDE_SIZE_BYTES;
 extern const config_var_info_t<uint32_t, int64_t> CONFIG_VAR_STRQ_STRIDES_COMPENSATION_LEVEL;
 extern const config_var_info_t<bool> CONFIG_VAR_RELAXED_ORDERING;
+extern const config_var_info_t<bool> CONFIG_VAR_HEADERS_64;
 
 extern const config_var_info_t<uint32_t, int64_t> CONFIG_VAR_RX_BUF_SIZE;
 extern const config_var_info_t<uint32_t, int64_t> CONFIG_VAR_RX_NUM_WRE;

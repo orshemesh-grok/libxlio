@@ -1,6 +1,6 @@
 # XLIO Configuration Reference
 
-This file documents all 122 XLIO runtime configuration parameters with their types, defaults, environment variables, and constraints.
+This file documents all 123 XLIO runtime configuration parameters with their types, defaults, environment variables, and constraints.
 
 > **Auto-generated** from the JSON schema by `generate_docs.py`. Do not edit manually.
 
@@ -31,6 +31,7 @@ This file documents all 122 XLIO runtime configuration parameters with their typ
   - [`core.syscall.fork_support`](#coresyscallfork_support) — Enable fork support
   - [`core.syscall.sendfile_cache_limit`](#coresyscallsendfile_cache_limit) — Sendfile byte limit
 - **[HARDWARE_FEATURES](#hardware_features)**
+  - [`hardware_features.headers-64`](#hardware_featuresheaders-64) — Align ordinary IPv4/TCP receive payload to 64 bytes
   - [`hardware_features.memory_registration.relaxed_ordering`](#hardware_featuresmemory_registrationrelaxed_ordering) — Request relaxed ordering for memory registration
   - [`hardware_features.striding_rq.enable`](#hardware_featuresstriding_rqenable) — Enable striding receive queues
   - [`hardware_features.striding_rq.stride_size`](#hardware_featuresstriding_rqstride_size) — Size of each stride (bytes)
@@ -748,6 +749,18 @@ working set = 10GB → default 10GB is appropriate.
 ---
 
 ## HARDWARE_FEATURES
+
+### `hardware_features.headers-64`
+
+> **Type:** boolean
+>
+> **Maps to:** `XLIO_HEADERS_64`
+
+Experimental: insert two synthetic VLAN tags (8 bytes) in each receive steering path and ignore those tags in software parsing. Requires striding RQ and the paired DPCP two-byte-shift patch. With Ethernet 14, IPv4 20 and TCP 20-byte headers, the payload starts 64 bytes from the stride base. Original VLAN tags, IP/TCP options or IPv6 change that offset. LRO append alignment also requires payload lengths divisible by 64.
+
+Prototype limitation: the paired DPCP unconditionally enables the two-byte prefix on striding RQs, even when this boolean is false; XLIO always compensates for that prefix. False disables synthetic VLAN insertion. Regular RQ is unchanged when false. Use only with this worktree's private DPCP build.
+
+**Default:** `false`
 
 ### `hardware_features.memory_registration.relaxed_ordering`
 

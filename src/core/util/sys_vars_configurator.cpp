@@ -81,6 +81,7 @@ const config_var_info_t<uint32_t, int64_t> CONFIG_VAR_STRQ_STRIDE_SIZE_BYTES {
     "hardware_features.striding_rq.stride_size"};
 const config_var_info_t<uint32_t, int64_t> CONFIG_VAR_STRQ_STRIDES_COMPENSATION_LEVEL {
     "performance.rings.rx.spare_strides"};
+const config_var_info_t<bool> CONFIG_VAR_HEADERS_64 {"hardware_features.headers-64"};
 const config_var_info_t<bool> CONFIG_VAR_RELAXED_ORDERING {
     "hardware_features.memory_registration.relaxed_ordering"};
 
@@ -479,6 +480,8 @@ void sys_var_configurator::initialize_base_variables()
 
     m_runtime_registry.register_and_set_default_value(&m_sys_vars.enable_striding_rq,
                                                       CONFIG_VAR_STRQ);
+    m_runtime_registry.register_and_set_default_value(&m_sys_vars.headers_64,
+                                                      CONFIG_VAR_HEADERS_64);
     m_runtime_registry.register_and_set_default_value(&m_sys_vars.enable_relaxed_ordering,
                                                       CONFIG_VAR_RELAXED_ORDERING);
     // Translator ensures it is a power of 2

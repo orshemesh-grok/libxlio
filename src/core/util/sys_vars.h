@@ -219,6 +219,7 @@ public:
 
     bool enable_striding_rq;
     bool enable_relaxed_ordering;
+    bool headers_64;
     bool tcp_2t_rules;
     bool tcp_3t_rules;
     bool udp_3t_rules;
@@ -425,6 +426,7 @@ extern const mce_sys_var &safe_mce_sys();
 #define SYS_VAR_STRQ_STRIDE_SIZE_BYTES          "XLIO_STRQ_STRIDE_SIZE_BYTES"
 #define SYS_VAR_STRQ_STRIDES_COMPENSATION_LEVEL "XLIO_STRQ_STRIDES_COMPENSATION_LEVEL"
 #define SYS_VAR_RELAXED_ORDERING                "XLIO_RELAXED_ORDERING"
+#define SYS_VAR_HEADERS_64                      "XLIO_HEADERS_64"
 
 #define SYS_VAR_RX_BUF_SIZE                   "XLIO_RX_BUF_SIZE"
 #define SYS_VAR_RX_NUM_WRE                    "XLIO_RX_WRE"
@@ -575,6 +577,7 @@ extern const mce_sys_var &safe_mce_sys();
 #define MCE_DEFAULT_STRQ_NUM_WRE_TO_POST_RECV       (1)
 #define MCE_DEFAULT_STRQ_STRIDES_COMPENSATION_LEVEL (32768)
 #define MCE_DEFAULT_RELAXED_ORDERING                (false)
+#define MCE_DEFAULT_HEADERS_64                      (false)
 
 #define MCE_DEFAULT_RX_BUF_SIZE                   (0)
 #define MCE_DEFAULT_RX_BUFS_BATCH                 (64)

@@ -637,6 +637,12 @@
                         }
                     },
                     "additionalProperties": false
+                },
+                "headers-64": {
+                    "type": "boolean",
+                    "default": false,
+                    "title": "Align ordinary IPv4/TCP receive payload to 64 bytes",
+                    "description": "Maps to XLIO_HEADERS_64 environment variable.\nExperimental: insert two synthetic VLAN tags (8 bytes) in each receive steering path and ignore those tags in software parsing. Requires striding RQ and the paired DPCP two-byte-shift patch. With Ethernet 14, IPv4 20 and TCP 20-byte headers, the payload starts 64 bytes from the stride base. Original VLAN tags, IP/TCP options or IPv6 change that offset. LRO append alignment also requires payload lengths divisible by 64.\n\nPrototype limitation: the paired DPCP unconditionally enables the two-byte prefix on striding RQs, even when this boolean is false; XLIO always compensates for that prefix. False disables synthetic VLAN insertion. Regular RQ is unchanged when false. Use only with this worktree's private DPCP build."
                 }
             },
             "additionalProperties": false

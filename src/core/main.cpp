@@ -997,14 +997,15 @@ static size_t calc_rx_wqe_buff_size()
         RX_BUF_SIZE(safe_mce_sys().rx_buf_size ? safe_mce_sys().rx_buf_size
                                                : g_p_net_device_table_mgr->get_max_mtu());
     if (safe_mce_sys().enable_striding_rq) {
-        size_t min_puff_size = g_p_net_device_table_mgr->get_max_mtu() + ETH_VLAN_HDR_LEN;
+        size_t min_puff_size = g_p_net_device_table_mgr->get_max_mtu() + ETH_VLAN_HDR_LEN + 2U +
+            (safe_mce_sys().headers_64 ? 8U : 0U);
         buff_size = safe_mce_sys().strq_stride_num_per_rwqe * safe_mce_sys().strq_stride_size_bytes;
         if (buff_size < min_puff_size) {
             const std::string message = get_invalid_calc_info_message();
             vlog_printf(VLOG_INFO, message.c_str(), safe_mce_sys().strq_stride_num_per_rwqe,
                         safe_mce_sys().strq_stride_size_bytes, buff_size, min_puff_size);
 
-            buff_size = g_p_net_device_table_mgr->get_max_mtu() + ETH_VLAN_HDR_LEN;
+            buff_size = min_puff_size;
         }
     }
 

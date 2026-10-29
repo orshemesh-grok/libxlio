@@ -5,6 +5,7 @@
  */
 
 #include "cq_mgr_rx.h"
+#include "dev/rx_header_layout.h"
 #include "cq_mgr_rx_inl.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -237,13 +238,14 @@ void cq_mgr_rx::del_hqrx(hw_queue_rx *hqrx_ptr)
 
 void cq_mgr_rx::lro_update_hdr(struct xlio_mlx5_cqe *cqe, mem_buf_desc_t *p_rx_wc_buf_desc)
 {
-    struct ethhdr *p_eth_h = (struct ethhdr *)(p_rx_wc_buf_desc->p_buffer);
-    struct tcphdr *p_tcp_h;
-    size_t transport_header_len = ETH_HDR_LEN;
-
-    if (p_eth_h->h_proto == htons(ETH_P_8021Q)) {
-        transport_header_len = ETH_VLAN_HDR_LEN;
+    rx_l2_header header;
+    if (!rx_parse_l2_header(p_rx_wc_buf_desc->p_buffer, p_rx_wc_buf_desc->sz_data,
+                            safe_mce_sys().headers_64, header)) {
+        p_rx_wc_buf_desc->sz_data = 0; // The normal receive parser drops this malformed frame.
+        return;
     }
+    struct tcphdr *p_tcp_h;
+    size_t transport_header_len = header.length;
 
     if (0x02 == ((cqe->l4_hdr_type_etc >> 2) & 0x3)) {
         // CQE indicates IPv4 in the l3_hdr_type field
@@ -253,7 +255,7 @@ void cq_mgr_rx::lro_update_hdr(struct xlio_mlx5_cqe *cqe, mem_buf_desc_t *p_rx_w
         assert(p_ip_h->protocol == IPPROTO_TCP);
 
         p_ip_h->ttl = cqe->lro_min_ttl;
-        p_ip_h->tot_len = htons(ntohl(cqe->byte_cnt) - transport_header_len);
+        p_ip_h->tot_len = htons(p_rx_wc_buf_desc->sz_data - transport_header_len);
         p_ip_h->check = 0; // Ignore.
 
         p_tcp_h = (struct tcphdr *)((uint8_t *)p_ip_h + (int)(p_ip_h->ihl) * 4);
@@ -264,11 +266,11 @@ void cq_mgr_rx::lro_update_hdr(struct xlio_mlx5_cqe *cqe, mem_buf_desc_t *p_rx_w
 
         assert(0x01 == ((cqe->l4_hdr_type_etc >> 2) & 0x3)); // IPv6 L3 header.
         assert(p_ip6_h->ip6_nxt == IPPROTO_TCP);
-        assert(ntohl(cqe->byte_cnt) >= transport_header_len + IPV6_HLEN);
+        assert(p_rx_wc_buf_desc->sz_data >= transport_header_len + IPV6_HLEN);
 
         p_ip6_h->ip6_hlim = cqe->lro_min_ttl;
         // Payload length doesn't include main header.
-        p_ip6_h->ip6_plen = htons(ntohl(cqe->byte_cnt) - transport_header_len - IPV6_HLEN);
+        p_ip6_h->ip6_plen = htons(p_rx_wc_buf_desc->sz_data - transport_header_len - IPV6_HLEN);
 
         // LRO doesn't create a session for packets with extension headers, so IPv6 header is 40b.
         p_tcp_h = (struct tcphdr *)((uint8_t *)p_ip6_h + IPV6_HLEN);

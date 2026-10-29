@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-only or BSD-2-Clause
  */
 
+#include "dev/rx_header_layout.h"
 #include <inttypes.h>
 #include <netinet/ip6.h>
 #include "ring_slave.h"
@@ -571,7 +572,6 @@ bool ring_slave::rx_process_buffer(mem_buf_desc_t *p_rx_wc_buf_desc, void *pv_fd
 {
     static uint16_t NET_ETH_P_IP = htons(ETH_P_IP);
     static uint16_t NET_ETH_P_IPV6 = htons(ETH_P_IPV6);
-    static uint16_t NET_ETH_P_8021Q = htons(ETH_P_8021Q);
 
     size_t transport_header_len;
     struct ethhdr *p_eth_h = (struct ethhdr *)(p_rx_wc_buf_desc->p_buffer);
@@ -587,6 +587,14 @@ bool ring_slave::rx_process_buffer(mem_buf_desc_t *p_rx_wc_buf_desc, void *pv_fd
         }
         return false;
     }
+
+    rx_l2_header header;
+    if (!rx_parse_l2_header(p_rx_wc_buf_desc->p_buffer, sz_data, safe_mce_sys().headers_64,
+                            header) ||
+        sz_data < header.length + sizeof(iphdr)) {
+        return false;
+    }
+    transport_header_len = header.length;
 
     inc_cq_moderation_stats();
 
@@ -615,13 +623,6 @@ bool ring_slave::rx_process_buffer(mem_buf_desc_t *p_rx_wc_buf_desc, void *pv_fd
 
         if (likely(si)) {
             // will process packets with set flow_tag_id and enabled for the socket
-            if (p_eth_h->h_proto == NET_ETH_P_8021Q) {
-                // Handle VLAN header as next protocol
-                transport_header_len = ETH_VLAN_HDR_LEN;
-            } else {
-                transport_header_len = ETH_HDR_LEN;
-            }
-
             const void *saddr, *daddr;
             sa_family_t family;
             uint16_t ip_payload_len;
@@ -708,24 +709,14 @@ bool ring_slave::rx_process_buffer(mem_buf_desc_t *p_rx_wc_buf_desc, void *pv_fd
     // Validate transport type headers
     switch (m_transport_type) {
     case XLIO_TRANSPORT_ETH: {
-        uint16_t h_proto = p_eth_h->h_proto;
+        uint16_t h_proto = header.protocol;
 
         ring_logfunc("Rx buffer Ethernet dst=" ETH_HW_ADDR_PRINT_FMT
                      " <- src=" ETH_HW_ADDR_PRINT_FMT " type=%#x",
                      ETH_HW_ADDR_PRINT_ADDR(p_eth_h->h_dest),
                      ETH_HW_ADDR_PRINT_ADDR(p_eth_h->h_source), htons(h_proto));
 
-        // Handle VLAN header as next protocol
-        struct vlanhdr *p_vlan_hdr = nullptr;
-        uint16_t packet_vlan = 0;
-        if (h_proto == NET_ETH_P_8021Q) {
-            p_vlan_hdr = (struct vlanhdr *)((uint8_t *)p_eth_h + ETH_HDR_LEN);
-            transport_header_len = ETH_VLAN_HDR_LEN;
-            h_proto = p_vlan_hdr->h_vlan_encapsulated_proto;
-            packet_vlan = (htons(p_vlan_hdr->h_vlan_TCI) & VLAN_VID_MASK);
-        } else {
-            transport_header_len = ETH_HDR_LEN;
-        }
+        uint16_t packet_vlan = header.vlan_id;
 
         p_rx_wc_buf_desc->rx.n_transport_header_len = transport_header_len;
 

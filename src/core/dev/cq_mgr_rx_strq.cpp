@@ -5,6 +5,7 @@
  */
 
 #include "cq_mgr_rx_strq.h"
+#include "dev/rx_header_layout.h"
 
 #if defined(DEFINED_DIRECT_VERBS)
 
@@ -224,6 +225,15 @@ inline bool cq_mgr_rx_strq::strq_cqe_to_mem_buff_desc(struct xlio_mlx5_cqe *cqe,
         _hot_buffer_stride->sz_buffer = _hot_buffer_stride->rx.strides_num * _stride_size_bytes;
         _current_wqe_consumed_bytes += _hot_buffer_stride->sz_buffer;
 
+        // The private DPCP enables the prefix for every STRQ, independently of headers_64.
+        // Parent WQE ownership, consumed bytes and refcounts remain in full strides.
+        if (!is_filler &&
+            !rx_skip_strq_prefix(_hot_buffer_stride->p_buffer, _hot_buffer_stride->sz_data,
+                                 _hot_buffer_stride->sz_buffer)) {
+            status = BS_GENERAL_ERR;
+            break;
+        }
+
         _hot_buffer_stride->rx.timestamps.hw_raw = ntohll(cqe->timestamp);
         uint32_t sop_rxdrop_qpn_flowtag_h_byte = ntohl(cqe->sop_rxdrop_qpn_flowtag);
         _hot_buffer_stride->rx.flow_tag_id = sop_rxdrop_qpn_flowtag_h_byte & 0x00FFFFFF;
@@ -234,7 +244,7 @@ inline bool cq_mgr_rx_strq::strq_cqe_to_mem_buff_desc(struct xlio_mlx5_cqe *cqe,
 #ifdef DEFINED_UTLS
         _hot_buffer_stride->rx.tls_decrypted = (cqe->pkt_info >> 3) & 0x3;
 #endif /* DEFINED_UTLS */
-        if (cqe->lro_num_seg > 1) {
+        if (!is_filler && cqe->lro_num_seg > 1) {
             lro_update_hdr(cqe, _hot_buffer_stride);
             m_p_cq_stat->n_rx_lro_packets++;
             m_p_cq_stat->n_rx_lro_bytes += _hot_buffer_stride->sz_data;

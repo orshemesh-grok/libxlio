@@ -7,6 +7,7 @@
 #ifndef CQ_MGR_INL_H
 #define CQ_MGR_INL_H
 
+#include "dev/rx_header_layout.h"
 #include "cq_mgr_rx.h"
 #include "ring_simple.h"
 #include "util/utils.h"
@@ -50,21 +51,21 @@ inline uint32_t cq_mgr_rx::process_recv_queue(void *pv_fd_ready_array)
 // should be processed immediately (TCP) or pushed to a queue (UDP).
 inline bool is_eth_tcp_frame(mem_buf_desc_t *buff)
 {
-    struct ethhdr *p_eth_h = (struct ethhdr *)(buff->p_buffer);
-    uint16_t h_proto = p_eth_h->h_proto;
-
-    size_t transport_header_len = ETH_HDR_LEN;
-    struct vlanhdr *p_vlan_hdr = nullptr;
-    if (h_proto == htons(ETH_P_8021Q)) {
-        p_vlan_hdr = (struct vlanhdr *)((uint8_t *)p_eth_h + transport_header_len);
-        transport_header_len = ETH_VLAN_HDR_LEN;
-        h_proto = p_vlan_hdr->h_vlan_encapsulated_proto;
+    rx_l2_header header;
+    if (!rx_parse_l2_header(buff->p_buffer, buff->sz_data, safe_mce_sys().headers_64, header)) {
+        return false;
+    }
+    uint16_t h_proto = header.protocol;
+    size_t transport_header_len = header.length;
+    if (buff->sz_data < transport_header_len + sizeof(iphdr)) {
+        return false;
     }
     if (h_proto == htons(ETH_P_IP)) {
         struct iphdr *p_ip_h = (struct iphdr *)(buff->p_buffer + transport_header_len);
         return (p_ip_h->protocol == IPPROTO_TCP);
     }
-    if (likely(h_proto == htons(ETH_P_IPV6))) {
+    if (likely(h_proto == htons(ETH_P_IPV6)) &&
+        buff->sz_data >= transport_header_len + sizeof(ip6_hdr)) {
         struct ip6_hdr *p_ip_h = (struct ip6_hdr *)(buff->p_buffer + transport_header_len);
 
         // For IPv6 we must consider the case that there might be extention headers.

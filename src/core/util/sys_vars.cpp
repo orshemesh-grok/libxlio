@@ -816,6 +816,7 @@ void mce_sys_var::get_env_params()
     strq_stride_size_bytes = MCE_DEFAULT_STRQ_STRIDE_SIZE_BYTES;
     strq_strides_compensation_level = MCE_DEFAULT_STRQ_STRIDES_COMPENSATION_LEVEL;
     enable_relaxed_ordering = MCE_DEFAULT_RELAXED_ORDERING;
+    headers_64 = MCE_DEFAULT_HEADERS_64;
 
     gro_streams_max = MCE_DEFAULT_GRO_STREAMS_MAX;
     disable_flow_tag = MCE_DEFAULT_DISABLE_FLOW_TAG;
@@ -1150,6 +1151,10 @@ void mce_sys_var::get_env_params()
 
     if ((env_ptr = getenv(SYS_VAR_STRQ_STRIDES_COMPENSATION_LEVEL))) {
         strq_strides_compensation_level = (uint32_t)atoi(env_ptr);
+    }
+
+    if ((env_ptr = getenv(SYS_VAR_HEADERS_64))) {
+        headers_64 = atoi(env_ptr) != 0;
     }
 
     if ((env_ptr = getenv(SYS_VAR_RELAXED_ORDERING))) {
@@ -1852,6 +1857,13 @@ void mce_sys_var::get_params()
                         e.message.c_str());
             exit(-1);
         }
+    }
+
+    if (headers_64 && !enable_striding_rq) {
+        vlog_printf(VLOG_ERROR,
+                    "headers-64 requires hardware_features.striding_rq.enable=true "
+                    "(XLIO_STRQ=1).\n");
+        exit(-1);
     }
 
     // Capture library init time for tuning report duration calculation.

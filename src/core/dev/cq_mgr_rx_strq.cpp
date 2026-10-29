@@ -6,14 +6,15 @@
 
 #include "cq_mgr_rx_strq.h"
 #include "dev/rx_header_layout.h"
+#include "dev/rx_layout_sample.h"
 
 #if defined(DEFINED_DIRECT_VERBS)
 
-#include <util/valgrind.h>
 #include "cq_mgr_rx_inl.h"
 #include "hw_queue_rx.h"
 #include "ring_simple.h"
 #include <cinttypes>
+#include <util/valgrind.h>
 
 #define MODULE_NAME "cq_mgr_rx_strq"
 
@@ -84,10 +85,10 @@ mem_buf_desc_t *cq_mgr_rx_strq::next_stride()
         if (!g_buffer_pool_rx_stride->get_buffers_thread_safe(
                 _stride_cache, _owner_ring, safe_mce_sys().strq_strides_compensation_level, 0U)) {
             // This pool should be an infinite pool
-            __log_info_panic(
-                "Unable to retrieve strides from global pool, Free: %zu, Requested: %u",
-                g_buffer_pool_rx_stride->get_free_count(),
-                safe_mce_sys().strq_strides_compensation_level);
+            __log_info_panic("Unable to retrieve strides from global pool, Free: "
+                             "%zu, Requested: %u",
+                             g_buffer_pool_rx_stride->get_free_count(),
+                             safe_mce_sys().strq_strides_compensation_level);
         }
     }
 
@@ -220,13 +221,17 @@ inline bool cq_mgr_rx_strq::strq_cqe_to_mem_buff_desc(struct xlio_mlx5_cqe *cqe,
         is_filler = (host_byte_cnt >> 31 != 0U ? true : false);
         _hot_buffer_stride->sz_data =
             host_byte_cnt & 0x0000FFFFU; // In case of a Filler/Error this size is invalid.
-        _hot_buffer_stride->p_buffer = m_rx_hot_buffer->p_buffer +
-            _current_wqe_consumed_bytes; //(_stride_size_bytes * ntohs(cqe->wqe_counter))
+        _hot_buffer_stride->p_buffer =
+            m_rx_hot_buffer->p_buffer + _current_wqe_consumed_bytes; //(_stride_size_bytes *
+                                                                     //ntohs(cqe->wqe_counter))
         _hot_buffer_stride->sz_buffer = _hot_buffer_stride->rx.strides_num * _stride_size_bytes;
         _current_wqe_consumed_bytes += _hot_buffer_stride->sz_buffer;
 
-        // The private DPCP enables the prefix for every STRQ, independently of headers_64.
-        // Parent WQE ownership, consumed bytes and refcounts remain in full strides.
+        const uint8_t *capture_slot_start = _hot_buffer_stride->p_buffer;
+
+        // The private DPCP enables the prefix for every STRQ, independently of
+        // headers_64. Parent WQE ownership, consumed bytes and refcounts remain in
+        // full strides.
         if (!is_filler &&
             !rx_skip_strq_prefix(_hot_buffer_stride->p_buffer, _hot_buffer_stride->sz_data,
                                  _hot_buffer_stride->sz_buffer)) {
@@ -248,6 +253,12 @@ inline bool cq_mgr_rx_strq::strq_cqe_to_mem_buff_desc(struct xlio_mlx5_cqe *cqe,
             lro_update_hdr(cqe, _hot_buffer_stride);
             m_p_cq_stat->n_rx_lro_packets++;
             m_p_cq_stat->n_rx_lro_bytes += _hot_buffer_stride->sz_data;
+        }
+        if (!is_filler) {
+            xlio_rx_layout::capture_sample(m_p_ring->get_rx_layout_capture(),
+                                           _hot_buffer_stride->p_buffer,
+                                           _hot_buffer_stride->sz_data, capture_slot_start,
+                                           safe_mce_sys().headers_64, true, cqe->lro_num_seg);
         }
         break;
     }
@@ -328,7 +339,8 @@ int cq_mgr_rx_strq::drain_and_proccess_helper(mem_buf_desc_t *buff, mem_buf_desc
         compensate_qp_poll_failed(); // Reuse this method as success.
     }
 
-    // Handle a stride. It can be that we have got a Filler CQE, in this case buff is null.
+    // Handle a stride. It can be that we have got a Filler CQE, in this case buff
+    // is null.
     if (buff) {
         ++ret_total;
         if (process_strq_cq_element_rx(buff, status)) {
@@ -359,7 +371,8 @@ int cq_mgr_rx_strq::drain_and_proccess(uintptr_t *p_recycle_buffers_last_wr_id)
 {
     cq_logfuncall("cq contains %d wce in m_rx_queue", m_rx_queue.size());
 
-    // CQ polling loop until max wce limit is reached for this interval or CQ is drained
+    // CQ polling loop until max wce limit is reached for this interval or CQ is
+    // drained
     uint32_t ret_total = 0;
 
     // drain_and_proccess() is mainly called in following cases as

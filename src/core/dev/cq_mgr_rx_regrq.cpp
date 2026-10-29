@@ -5,13 +5,14 @@
  */
 
 #include "cq_mgr_rx_regrq.h"
+#include "dev/rx_layout_sample.h"
 
 #if defined(DEFINED_DIRECT_VERBS)
 
-#include <util/valgrind.h>
 #include "cq_mgr_rx_inl.h"
 #include "hw_queue_rx.h"
 #include "ring_simple.h"
+#include <util/valgrind.h>
 
 #include <netinet/ip6.h>
 
@@ -126,6 +127,10 @@ void cq_mgr_rx_regrq::cqe_to_mem_buff_desc(struct xlio_mlx5_cqe *cqe,
             m_p_cq_stat->n_rx_lro_packets++;
             m_p_cq_stat->n_rx_lro_bytes += p_rx_wc_buf_desc->sz_data;
         }
+        xlio_rx_layout::capture_sample(m_p_ring->get_rx_layout_capture(),
+                                       p_rx_wc_buf_desc->p_buffer, p_rx_wc_buf_desc->sz_data,
+                                       p_rx_wc_buf_desc->p_buffer, safe_mce_sys().headers_64, false,
+                                       cqe->lro_num_seg);
         return;
     }
     case MLX5_CQE_INVALID: /* No cqe!*/
@@ -178,7 +183,8 @@ int cq_mgr_rx_regrq::drain_and_proccess(uintptr_t *p_recycle_buffers_last_wr_id 
 {
     cq_logfuncall("cq contains %d wce in m_rx_queue", m_rx_queue.size());
 
-    /* CQ polling loop until max wce limit is reached for this interval or CQ is drained */
+    /* CQ polling loop until max wce limit is reached for this interval or CQ is
+     * drained */
     uint32_t ret_total = 0;
 
     /* drain_and_proccess() is mainly called in following cases as

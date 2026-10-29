@@ -61,6 +61,50 @@ Log only sockets that match list or range, format: 4-16 or 1,9 (or combination).
 Print version.
 .TP
 
+.SH RX LAYOUT CAPTURE
+Use --rx-layout with -p to request bounded TCP receive-layout batches:
+.PP
+.nf
+xlio_stats -p PID --rx-layout --rx-samples 256 -i 1 -c 10
+.fi
+.PP
+--rx-samples selects 1 to 256 records per ring (default 256).
+The interval must be at least one second. -c counts display updates, including
+updates without samples; zero means unlimited updates. Capture cannot be combined
+with view, detail, socket-filter, CSV, logging, counter-reset or dump options.
+.PP
+The target must use a library with the capture extension. Capture requires write
+access to its statistics file. Only one capture reader can hold the file lock;
+ordinary statistics readers can run concurrently without requesting captures.
+.PP
+Before any eligible samples arrive, the view prints "No traffic". A partial batch
+prints "Collecting samples (n/N)" and persists across updates. Each request inspects
+at most four times the requested number of successful, non-filler completions;
+unsupported or malformed packets count as excluded. That inspection limit, or a
+ring closing, can publish a short or empty batch. CQ errors and STRQ fillers are
+not inspected and are not included in the excluded count.
+.PP
+Tables show common layouts ordered by sample count. Prefix is the space before
+Ethernet; Hdr is L2 + IP + TCP bytes, excluding Prefix. Frame is the normalized
+completion length, excluding the prefix but possibly including Ethernet padding.
+Payload is derived from IP and TCP lengths and excludes Ethernet padding.
+Offset is the payload position relative to the receive slot. A%64 is the actual
+payload address modulo 64; L%64 is payload length modulo 64. Data alignment
+percentages exclude control-only packets. LRO identifies the aggregate segment
+count, normalized to one for a non-aggregated completion.
+.PP
+These are RX completion samples, taken before software GRO. They are not PCIe
+transaction sizes or on-wire sizes including FCS/preamble. LRO aggregates do not
+reveal every constituent segment's length or alignment. Percentages describe each
+ring's short sampled burst, not its traffic over the entire display interval.
+.PP
+Capture adds one state check per eligible completion while inactive. Only an
+outstanding request enables diagnostic parsing and record writes. If the reader
+exits, the outstanding bounded batch can finish; a later reader adopts it.
+There are 16 capture slots per process. Retired unread slots remain pinned until
+a reader consumes them. Rings denied a slot continue normal networking but remain
+unsampled for their lifetime; the view reports the registration failure count.
+
 .SH SEE ALSO
 .BR xlio (7)
 

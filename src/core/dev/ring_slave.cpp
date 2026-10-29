@@ -4,16 +4,16 @@
  * SPDX-License-Identifier: GPL-2.0-only or BSD-2-Clause
  */
 
-#include "dev/rx_header_layout.h"
-#include <inttypes.h>
-#include <netinet/ip6.h>
 #include "ring_slave.h"
-#include "proto/ip_frag.h"
 #include "dev/rfs_mc.h"
 #include "dev/rfs_uc_tcp_gro.h"
+#include "dev/rx_header_layout.h"
+#include "proto/ip_frag.h"
+#include "proto/tls.h"
 #include "sock/fd_collection.h"
 #include "sock/sockinfo_tcp.h"
-#include "proto/tls.h"
+#include <inttypes.h>
+#include <netinet/ip6.h>
 
 #undef MODULE_NAME
 #define MODULE_NAME "ring_slave"
@@ -39,6 +39,7 @@ ring_slave::ring_slave(int if_index, ring *parent, bool use_locks)
     , m_lock_ring_rx(get_new_lock("ring_slave:lock_rx", use_locks))
     , m_lock_ring_tx(get_new_lock("ring_slave:lock_tx", use_locks))
     , m_p_ring_stat(new ring_stats_t)
+    , m_rx_layout_capture(nullptr)
     , m_vlan(0)
     , m_flow_tag_enabled(false)
     , m_b_sysvar_eth_mc_l2_only_rules(safe_mce_sys().eth_mc_l2_only_rules)
@@ -76,12 +77,17 @@ ring_slave::ring_slave(int if_index, ring *parent, bool use_locks)
     m_zc_pool.set_id("ring_slave (%p) : m_zc_pool", this);
 
     xlio_stats_instance_create_ring_block(m_p_ring_stat.get());
+    m_rx_layout_capture =
+        xlio_rx_layout::register_ring(reinterpret_cast<uintptr_t>(this), if_index);
 
     print_val();
 }
 
 ring_slave::~ring_slave()
 {
+    if (m_rx_layout_capture) {
+        xlio_rx_layout::close(*m_rx_layout_capture);
+    }
     print_val();
 
     if (m_p_ring_stat) {
@@ -178,14 +184,16 @@ bool steering_handler<KEY4T, KEY2T, HDR>::attach_flow(flow_tuple &flow_spec_5t, 
 
         if (flow_tag_id && sink->flow_in_reuse()) {
             flow_tag_id = FLOW_TAG_MASK;
-            ring_logdbg("UC flow tag for socketinfo=%p is disabled: SO_REUSEADDR or SO_REUSEPORT "
+            ring_logdbg("UC flow tag for socketinfo=%p is disabled: SO_REUSEADDR or "
+                        "SO_REUSEPORT "
                         "were enabled",
                         sink);
         }
 
         auto itr = m_flow_udp_uc_map.find(rfs_key);
         if (itr == end(m_flow_udp_uc_map)) {
-            // No rfs object exists so a new one must be created and inserted in the flow map
+            // No rfs object exists so a new one must be created and inserted in the
+            // flow map
             if (safe_mce_sys().udp_3t_rules) {
                 flow_tuple udp_3t_only(flow_spec_5t.get_dst_ip(), flow_spec_5t.get_dst_port(),
                                        ip_address::any_addr(), 0, flow_spec_5t.get_protocol(),
@@ -234,10 +242,11 @@ bool steering_handler<KEY4T, KEY2T, HDR>::attach_flow(flow_tuple &flow_spec_5t, 
             }
         }
         // Note for CX3:
-        // For IB MC flow, the port is zeroed in the ibv_flow_spec when calling to ibv_flow_spec().
-        // It means that for every MC group, even if we have sockets with different ports - only one
-        // rule in the HW. So the hash map below keeps track of the number of sockets per rule so we
-        // know when to call ibv_attach and ibv_detach
+        // For IB MC flow, the port is zeroed in the ibv_flow_spec when calling to
+        // ibv_flow_spec(). It means that for every MC group, even if we have
+        // sockets with different ports - only one rule in the HW. So the hash map
+        // below keeps track of the number of sockets per rule so we know when to
+        // call ibv_attach and ibv_detach
         rfs_rule_filter *l2_mc_ip_filter = nullptr;
         if (m_ring.m_b_sysvar_eth_mc_l2_only_rules) {
             auto l2_mc_iter = m_ring.m_l2_mc_ip_attach_map.find(rule_key);
@@ -251,8 +260,8 @@ bool steering_handler<KEY4T, KEY2T, HDR>::attach_flow(flow_tuple &flow_spec_5t, 
 
         auto itr = m_flow_udp_mc_map.find(key_udp_mc);
         if (itr == m_flow_udp_mc_map.end()) {
-            // It means that no rfs object exists so I need to create a new one and insert it to
-            // the flow map.
+            // It means that no rfs object exists so I need to create a new one and
+            // insert it to the flow map.
             if (m_ring.m_b_sysvar_eth_mc_l2_only_rules) {
                 l2_mc_ip_filter =
                     new rfs_rule_filter(m_ring.m_l2_mc_ip_attach_map, rule_key, flow_spec_5t);
@@ -295,15 +304,16 @@ bool steering_handler<KEY4T, KEY2T, HDR>::attach_flow(flow_tuple &flow_spec_5t, 
         if (flow_tag_id &&
             (flow_spec_5t.is_3_tuple() || (!force_5t && safe_mce_sys().tcp_3t_rules) ||
              safe_mce_sys().tcp_2t_rules)) {
-            ring_logdbg("flow tag id = %d is disabled for socket fd = %d to be processed on RFS!",
+            ring_logdbg("flow tag id = %d is disabled for socket fd = %d to be "
+                        "processed on RFS!",
                         flow_tag_id, sink->get_fd());
             flow_tag_id = FLOW_TAG_MASK;
         }
 
         auto itr = m_flow_tcp_map.find(rfs_key);
         if (itr == end(m_flow_tcp_map)) {
-            // It means that no rfs object exists so I need to create a new one and insert it to
-            // the flow map
+            // It means that no rfs object exists so I need to create a new one and
+            // insert it to the flow map
             if (safe_mce_sys().tcp_2t_rules) {
                 flow_tuple tcp_2t_only(flow_spec_5t.get_dst_ip(), 0, ip_address::any_addr(), 0,
                                        flow_spec_5t.get_protocol(), flow_spec_5t.get_family());
@@ -362,8 +372,8 @@ bool steering_handler<KEY4T, KEY2T, HDR>::attach_flow(flow_tuple &flow_spec_5t, 
     bool ret = p_rfs->attach_flow(sink);
     if (ret) {
         if (flow_tag_id && (flow_tag_id != FLOW_TAG_MASK)) {
-            // A flow with FlowTag was attached succesfully, check stored rfs for fast path be
-            // tag_id
+            // A flow with FlowTag was attached succesfully, check stored rfs for fast
+            // path be tag_id
             sink->set_flow_tag(flow_tag_id);
             ring_logdbg("flow_tag: %d registration is done!", flow_tag_id);
         }
@@ -479,11 +489,12 @@ bool steering_handler<KEY4T, KEY2T, HDR>::detach_flow(flow_tuple &flow_spec_5t, 
                            flow_spec_5t.get_dst_port());
         if (safe_mce_sys().tcp_3t_rules || safe_mce_sys().tcp_2t_rules) {
             if (safe_mce_sys().tcp_2t_rules) {
-                // Mirror attach_flow(): the 2-tuple steering rule's reference counter is keyed by
-                // destination IP only (port zeroed). Without zeroing the port here the lookup
-                // misses, the shared rule's refcount is never decremented to 0, the rule is never
-                // destroyed and it keeps the TIR (and thus the RX RQ/CQ) alive, leaking the CQ
-                // buffer on every ring teardown (RM#5030951).
+                // Mirror attach_flow(): the 2-tuple steering rule's reference counter
+                // is keyed by destination IP only (port zeroed). Without zeroing the
+                // port here the lookup misses, the shared rule's refcount is never
+                // decremented to 0, the rule is never destroyed and it keeps the TIR
+                // (and thus the RX RQ/CQ) alive, leaking the CQ buffer on every ring
+                // teardown (RM#5030951).
                 rule_key.set_in_port(0);
             }
             auto dst_port_iter = m_ring.m_tcp_dst_port_attach_map.find(rule_key);
@@ -566,8 +577,9 @@ static inline bool check_rx_packet(sockinfo *si, mem_buf_desc_t *p_rx_wc_buf_des
     return si->rx_input_cb(p_rx_wc_buf_desc, fd_ready_array);
 }
 
-// All CQ wce come here for some basic sanity checks and then are distributed to the correct ring
-// handler Return values: false = Reuse this data buffer & mem_buf_desc
+// All CQ wce come here for some basic sanity checks and then are distributed to
+// the correct ring handler Return values: false = Reuse this data buffer &
+// mem_buf_desc
 bool ring_slave::rx_process_buffer(mem_buf_desc_t *p_rx_wc_buf_desc, void *pv_fd_ready_array)
 {
     static uint16_t NET_ETH_P_IP = htons(ETH_P_IP);
@@ -604,7 +616,8 @@ bool ring_slave::rx_process_buffer(mem_buf_desc_t *p_rx_wc_buf_desc, void *pv_fd
     m_p_ring_stat->n_rx_tls_auth_fail += !!(p_rx_wc_buf_desc->rx.tls_decrypted == TLS_RX_AUTH_FAIL);
 #endif /* DEFINED_UTLS */
 
-    // This is an internal function (within ring and 'friends'). No need for lock mechanism.
+    // This is an internal function (within ring and 'friends'). No need for lock
+    // mechanism.
     if (likely(m_flow_tag_enabled && p_rx_wc_buf_desc->rx.flow_tag_id &&
                p_rx_wc_buf_desc->rx.flow_tag_id != FLOW_TAG_MASK &&
                !p_rx_wc_buf_desc->rx.is_sw_csum_need)) {
@@ -650,7 +663,8 @@ bool ring_slave::rx_process_buffer(mem_buf_desc_t *p_rx_wc_buf_desc, void *pv_fd
             // Remove ethernet padding from the data size
             p_rx_wc_buf_desc->sz_data = transport_header_len + ip_hdr_len + ip_payload_len;
 
-            ring_logfunc("FAST PATH Rx packet info: transport_header_len: %d, IP_header_len: %d L3 "
+            ring_logfunc("FAST PATH Rx packet info: transport_header_len: %d, "
+                         "IP_header_len: %d L3 "
                          "proto: %d flow_tag_id: %d",
                          transport_header_len, ip_hdr_len, protocol,
                          p_rx_wc_buf_desc->rx.flow_tag_id);
@@ -720,17 +734,19 @@ bool ring_slave::rx_process_buffer(mem_buf_desc_t *p_rx_wc_buf_desc, void *pv_fd
 
         p_rx_wc_buf_desc->rx.n_transport_header_len = transport_header_len;
 
-        // TODO: Remove this code when handling vlan in flow steering will be available. Change this
-        // code if vlan stripping is performed.
+        // TODO: Remove this code when handling vlan in flow steering will be
+        // available. Change this code if vlan stripping is performed.
         if ((m_vlan & VLAN_VID_MASK) != packet_vlan) {
-            ring_logfunc("Rx buffer dropped- Mismatched vlan. Packet vlan = %d, Local vlan = %d",
+            ring_logfunc("Rx buffer dropped- Mismatched vlan. Packet vlan = %d, "
+                         "Local vlan = %d",
                          packet_vlan, m_vlan & VLAN_VID_MASK);
             return false;
         }
 
         // Validate IP header as next protocol
         if (unlikely(h_proto != NET_ETH_P_IP) && unlikely(h_proto != NET_ETH_P_IPV6)) {
-            ring_logwarn("Rx buffer dropped - Invalid Ethr Type (h_proto=%#x-p_eth_h->h_proto=%#x "
+            ring_logwarn("Rx buffer dropped - Invalid Ethr Type "
+                         "(h_proto=%#x-p_eth_h->h_proto=%#x "
                          ": %#x, %#x)",
                          h_proto, p_eth_h->h_proto, NET_ETH_P_IP, NET_ETH_P_IPV6);
             return false;
@@ -914,11 +930,12 @@ bool steering_handler<KEY4T, KEY2T, HDR>::rx_process_buffer_no_flow_id(
     size_t ip_tot_len = hdr_get_tot_len(p_ip_h);
     size_t sz_data = p_rx_wc_buf_desc->sz_data - p_rx_wc_buf_desc->rx.n_transport_header_len;
 
-    // Check that received buffer size is not smaller then the ip datagram total size
+    // Check that received buffer size is not smaller then the ip datagram total
+    // size
     if (unlikely(sz_data < ip_tot_len)) {
-        ring_logwarn(
-            "Rx packet dropped - buffer too small for received datagram (RxBuf:%zu IP:%zu)",
-            sz_data, ip_tot_len);
+        ring_logwarn("Rx packet dropped - buffer too small for received datagram "
+                     "(RxBuf:%zu IP:%zu)",
+                     sz_data, ip_tot_len);
         ring_loginfo("Rx packet info (buf->%p, bufsize=%zu), id=%s", p_rx_wc_buf_desc->p_buffer,
                      p_rx_wc_buf_desc->sz_data, hdr_get_id(p_ip_h).c_str());
         vlog_print_buffer(VLOG_INFO, "rx packet data: ", "\n",
@@ -948,8 +965,8 @@ bool steering_handler<KEY4T, KEY2T, HDR>::rx_process_buffer_no_flow_id(
                  hdr_get_id(p_ip_h).c_str(), iphdr_protocol_type_to_str(hdr_data.l4_protocol),
                  hdr_data.l4_protocol);
 
-    // Check that the ip datagram has at least the udp header size for the first ip fragment
-    // (besides the ip header)
+    // Check that the ip datagram has at least the udp header size for the first
+    // ip fragment (besides the ip header)
     if (unlikely((n_frag_offset == 0) &&
                  (ip_tot_len < (hdr_data.ip_hdr_len + sizeof(struct udphdr))))) {
         ring_logwarn("Rx packet dropped - ip packet too small (%zu bytes) - udp header cut!",
@@ -979,7 +996,8 @@ bool steering_handler<KEY4T, KEY2T, HDR>::rx_process_buffer_no_flow_id(
             return true;
         }
 
-        // Re-calc all ip related values for new ip packet of head fragmentation list
+        // Re-calc all ip related values for new ip packet of head fragmentation
+        // list
         size_t transport_header_len = p_rx_wc_buf_desc->rx.n_transport_header_len;
         p_rx_wc_buf_desc = new_buf;
         p_ip_h = (HDR *)(p_rx_wc_buf_desc->p_buffer + transport_header_len);
@@ -1105,8 +1123,8 @@ bool steering_handler<KEY4T, KEY2T, HDR>::rx_process_buffer_no_flow_id(
     }
 
     if (unlikely(!p_rfs)) {
-        ring_logdbg("Rx packet dropped - rfs object not found: dst=%s, src=%s, proto=%s[%" PRIu8
-                    "]",
+        ring_logdbg("Rx packet dropped - rfs object not found: dst=%s, src=%s, "
+                    "proto=%s[%" PRIu8 "]",
                     p_rx_wc_buf_desc->rx.dst.to_str_ip_port().c_str(),
                     p_rx_wc_buf_desc->rx.src.to_str_ip_port().c_str(),
                     iphdr_protocol_type_to_str(hdr_data.l4_protocol), hdr_data.l4_protocol);

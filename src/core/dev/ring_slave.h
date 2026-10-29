@@ -7,10 +7,12 @@
 #ifndef RING_SLAVE_H_
 #define RING_SLAVE_H_
 
-#include "ring.h"
-#include <memory>
+#include "util/rx_layout_capture.h"
+
 #include "dev/net_device_table_mgr.h"
+#include "ring.h"
 #include "util/sock_addr.h"
+#include <memory>
 
 class rfs;
 struct iphdr;
@@ -279,6 +281,8 @@ public:
 
     void accumulate_ring_stats(aggregated_ring_stats &agg) const override;
 
+    xlio_rx_layout::slot *get_rx_layout_capture() const { return m_rx_layout_capture; }
+
     bool m_active; /* State indicator */
 
     virtual mem_buf_desc_t *mem_buf_tx_get(ring_user_id_t id, bool b_block, pbuf_type type,
@@ -292,10 +296,11 @@ protected:
     steering_handler<flow_spec_4t_key_ipv4, flow_spec_2t_key_ipv4, iphdr> m_steering_ipv4;
     steering_handler<flow_spec_4t_key_ipv6, flow_spec_2t_key_ipv6, ip6_hdr> m_steering_ipv6;
 
-    // For IB MC flow, the port is zeroed in the ibv_flow_spec when calling to ibv_flow_spec().
-    // It means that for every MC group, even if we have sockets with different ports - only one
-    // rule in the HW. So the hash map below keeps track of the number of sockets per rule so we
-    // know when to call ibv_attach and ibv_detach
+    // For IB MC flow, the port is zeroed in the ibv_flow_spec when calling to
+    // ibv_flow_spec(). It means that for every MC group, even if we have sockets
+    // with different ports - only one rule in the HW. So the hash map below keeps
+    // track of the number of sockets per rule so we know when to call ibv_attach
+    // and ibv_detach
     rule_filter_map_t m_l2_mc_ip_attach_map;
     rule_filter_map_t m_tcp_dst_port_attach_map;
     rule_filter_map_t m_udp_uc_dst_port_attach_map;
@@ -307,6 +312,7 @@ protected:
     descq_t m_zc_pool;
     transport_type_t m_transport_type; /* transport ETH/IB */
     std::unique_ptr<ring_stats_t> m_p_ring_stat;
+    xlio_rx_layout::slot *m_rx_layout_capture;
     uint16_t m_vlan;
     bool m_flow_tag_enabled;
     const bool m_b_sysvar_eth_mc_l2_only_rules;
@@ -315,7 +321,7 @@ protected:
     template <typename KEY4T, typename KEY2T, typename HDR> friend class steering_handler;
 
 private:
-    uint8_t padding[58] = {}; // make class size up to a whole cache line
+    uint8_t padding[50] = {}; // make class size up to a whole cache line
 };
 
 static_assert(sizeof(ring_slave) % 64 == 0, "ring_slave size is not a multiple of cache line size");

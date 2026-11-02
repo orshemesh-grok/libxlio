@@ -249,16 +249,16 @@ inline bool cq_mgr_rx_strq::strq_cqe_to_mem_buff_desc(struct xlio_mlx5_cqe *cqe,
 #ifdef DEFINED_UTLS
         _hot_buffer_stride->rx.tls_decrypted = (cqe->pkt_info >> 3) & 0x3;
 #endif /* DEFINED_UTLS */
+        if (!is_filler) {
+            xlio_rx_layout::capture_sample(
+                m_p_ring->get_rx_layout_capture(), _hot_buffer_stride->p_buffer,
+                _hot_buffer_stride->sz_data, capture_slot_start, safe_mce_sys().headers_64, true,
+                cqe, m_rx_analysis_context);
+        }
         if (!is_filler && cqe->lro_num_seg > 1) {
             lro_update_hdr(cqe, _hot_buffer_stride);
             m_p_cq_stat->n_rx_lro_packets++;
             m_p_cq_stat->n_rx_lro_bytes += _hot_buffer_stride->sz_data;
-        }
-        if (!is_filler) {
-            xlio_rx_layout::capture_sample(m_p_ring->get_rx_layout_capture(),
-                                           _hot_buffer_stride->p_buffer,
-                                           _hot_buffer_stride->sz_data, capture_slot_start,
-                                           safe_mce_sys().headers_64, true, cqe->lro_num_seg);
         }
         break;
     }

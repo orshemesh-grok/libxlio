@@ -9,6 +9,7 @@
 #include "core/util/rx_layout_capture.h"
 #include "core/util/xlio_stats.h"
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/file.h>
 #include <sys/wait.h>
 #include <fcntl.h>
@@ -65,7 +66,7 @@ protected:
         unlink(path.c_str());
         rmdir(directory.c_str());
     }
-    void launch(unsigned samples, int cycles)
+    void launch(unsigned samples, int cycles, const std::string &csv = {})
     {
         pid_t target_pid = getpid();
         fflush(nullptr);
@@ -79,7 +80,7 @@ protected:
             dup2(out, STDOUT_FILENO);
             dup2(out, STDERR_FILENO);
             ::close(out);
-            int result = print_rx_layout(target_pid, directory, samples, 1, cycles);
+            int result = print_rx_analysis(target_pid, directory, samples, 1, cycles, csv);
             fflush(nullptr);
             _exit(result);
         }
@@ -117,14 +118,12 @@ TEST_F(rx_layout_view, no_traffic_then_partial_then_complete)
     auto &s = capture->slots[0];
     record r {};
     r.frame_bytes = 128;
-    r.payload_bytes = 64;
-    r.payload_offset = 64;
     publish_attempt(s, begin(s), &r);
     ASSERT_TRUE(await_text("Collecting samples (1/2)"));
     publish_attempt(s, begin(s), &r);
     ASSERT_EQ(0, finish());
     EXPECT_NE(std::string::npos, text().find("2/2 samples"));
-    EXPECT_NE(std::string::npos, text().find("length%64=0 100.00%"));
+    EXPECT_NE(std::string::npos, text().find("Excluded packets"));
     EXPECT_EQ(phase::idle, state(s.control.load()));
 }
 TEST_F(rx_layout_view, exclusive_lock_rejects_second_reader)
@@ -153,7 +152,6 @@ TEST_F(rx_layout_view, adopts_interrupted_reader_and_closed_batch)
     auto &s = capture->slots[0];
     ASSERT_TRUE(arm(s, s.control.load(), 1));
     record r {};
-    r.payload_bytes = 64;
     publish_attempt(s, begin(s), &r);
     uint64_t token;
     ASSERT_TRUE(reader_claim(s, token));
@@ -163,4 +161,25 @@ TEST_F(rx_layout_view, adopts_interrupted_reader_and_closed_batch)
     EXPECT_NE(std::string::npos, text().find("1/1 samples"));
     EXPECT_NE(std::string::npos, text().find("(closed)"));
     EXPECT_EQ(phase::free, state(s.control.load()));
+}
+
+TEST_F(rx_layout_view, unknown_fields_are_not_printed_as_zero)
+{
+    auto &s = capture->slots[0];
+    ASSERT_TRUE(arm(s, s.control.load(), 1));
+    record r {};
+    r.incomplete = 1;
+    publish_attempt(s, begin(s), &r);
+    launch(1, 1);
+    ASSERT_EQ(0, finish());
+    EXPECT_NE(std::string::npos, text().find("enable-mask=-"));
+    EXPECT_NE(std::string::npos, text().find("min-mss=-"));
+}
+TEST_F(rx_layout_view, csv_cannot_truncate_the_shared_mapping)
+{
+    launch(1, 1, path);
+    EXPECT_EQ(1, finish());
+    struct stat st {};
+    ASSERT_EQ(0, fstat(fd, &st));
+    EXPECT_EQ(bytes, static_cast<size_t>(st.st_size));
 }

@@ -153,7 +153,7 @@ void usage(const char *argv0)
            "2 - Extra info\n" INFO_TABS "3 - Full info\n" INFO_TABS
            "4 - Multicast groups\n" INFO_TABS "5 - Show as 'netstat -tunaep'\n" INFO_TABS
            "6 - Entity Context info\n");
-    printf("  --rx-layout\t\t\tCapture TCP RX layout batches (requires write "
+    printf("  --rx-analysis\t\t\tCapture raw RX analysis batches (requires write "
            "access)\n");
     printf("  --rx-samples=<1..256>\t\tRecords per ring per batch (default 256)\n");
     printf("  -d, --details=<1|2>\t\tSet details mode:\n" INFO_TABS "1 - Totals\n" INFO_TABS
@@ -169,9 +169,10 @@ void usage(const char *argv0)
     printf("  -s, --sockets=<list|range>\tLog only sockets that match <list> or "
            "<range>, format: "
            "4-16 or 1,9 (or combination)\n");
-    printf("  -C, --csv_file=<file path>\tA path to the statics CSV file\n");
+    printf("  -C, --csv_file=<file path>\tA path to the statistics or RX analysis CSV file\n");
     printf("  -V, --version\t\t\tPrint version\n");
     printf("  -h, --help\t\t\tPrint this help message\n");
+    fputs(rx_analysis_help(), stdout);
 }
 
 void update_delta_stat(socket_stats_t *p_curr_stat, socket_stats_t *p_prev_stat)
@@ -2055,7 +2056,7 @@ int main(int argc, char **argv)
                                                {"forbid_clean", 0, NULL, 'F'},
                                                {"help", 0, NULL, 'h'},
                                                {"csv_file", 1, NULL, 'C'},
-                                               {"rx-layout", 0, NULL, 1000},
+                                               {"rx-analysis", 0, NULL, 1000},
                                                {"rx-samples", 1, NULL, 1001},
                                                {0, 0, 0, 0}};
 
@@ -2064,7 +2065,7 @@ int main(int argc, char **argv)
             break;
         }
 
-        if (c == 0 || (c > 0 && c < 256 && strchr("vdzlsSCD", c))) {
+        if (c == 0 || (c > 0 && c < 256 && strchr("vdzlsSD", c))) {
             legacy_options_given = true;
         }
         switch (c) {
@@ -2246,13 +2247,13 @@ int main(int argc, char **argv)
          (legacy_options_given || user_params.view_mode != DEFAULT_VIEW_MODE ||
           user_params.zero_counters || user_params.dump != DUMP_DISABLED ||
           user_params.interval < 1))) {
-        log_err("--rx-layout cannot combine with view/detail/socket/CSV/log/zero/dump "
-                "options and needs interval >= 1; --rx-samples requires --rx-layout");
+        log_err("--rx-analysis cannot combine with view/detail/socket/log/zero/dump "
+                "options and needs interval >= 1; --rx-samples requires --rx-analysis");
         free(g_fd_mask);
         return 1;
     }
 
-    if (csv_given) {
+    if (csv_given && !rx_layout) {
         user_params.csv_stream.open(csv_path);
         if (!user_params.csv_stream.is_open()) {
             log_err("Unable to open file: %s", csv_path.c_str());
@@ -2287,8 +2288,8 @@ int main(int argc, char **argv)
         user_params.cycles = 1; // print once and exit
     }
 
-    int ret = rx_layout ? print_rx_layout(pids.front(), user_params.xlio_stats_path, rx_samples,
-                                          user_params.interval, user_params.cycles)
+    int ret = rx_layout ? print_rx_analysis(pids.front(), user_params.xlio_stats_path, rx_samples,
+                                            user_params.interval, user_params.cycles, csv_path)
                         : print_processes_stats(pids);
 
     free(g_fd_mask);

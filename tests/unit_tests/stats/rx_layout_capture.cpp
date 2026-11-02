@@ -20,7 +20,7 @@ TEST(rx_layout_capture, idle_then_exact_bounded_batch)
     EXPECT_EQ(0U, begin(s));
     ASSERT_TRUE(arm(s, s.control.load(), 2));
     record r {};
-    r.payload_bytes = 8960;
+    r.sw_time_ns = 8960;
     auto token = begin(s);
     ASSERT_NE(0U, token);
     publish_attempt(s, token, &r);
@@ -29,13 +29,13 @@ TEST(rx_layout_capture, idle_then_exact_bounded_batch)
     EXPECT_FALSE(reader_copy(s, b));
     token = begin(s);
     ASSERT_NE(0U, token);
-    r.payload_bytes = 17920;
+    r.sw_time_ns = 17920;
     publish_attempt(s, token, &r);
     EXPECT_EQ(0U, begin(s));
     ASSERT_TRUE(reader_copy(s, b));
     EXPECT_EQ(2U, b.count);
-    EXPECT_EQ(8960U, b.records[0].payload_bytes);
-    EXPECT_EQ(17920U, b.records[1].payload_bytes);
+    EXPECT_EQ(8960U, b.records[0].sw_time_ns);
+    EXPECT_EQ(17920U, b.records[1].sw_time_ns);
     EXPECT_EQ(123U, b.ring_id);
     EXPECT_EQ(7U, b.if_index);
     EXPECT_EQ(phase::idle, state(s.control.load()));
@@ -55,21 +55,20 @@ TEST(rx_layout_capture, cannot_rearm_or_read_partial_capture)
     EXPECT_FALSE(reader_copy(s, b));
     EXPECT_EQ(1U, s.progress.load());
 }
-TEST(rx_layout_capture, unsupported_traffic_has_bounded_work)
+TEST(rx_layout_capture, excluded_packets_also_fill_the_requested_batch)
 {
     slot s;
     ASSERT_TRUE(register_slot(s, 1, 1));
     ASSERT_TRUE(arm(s, s.control.load(), 2));
-    for (unsigned i = 0; i < 8; ++i) {
-        auto token = begin(s);
-        ASSERT_NE(0U, token);
-        publish_attempt(s, token, nullptr);
-    }
+    record r {};
+    r.incomplete = 1;
+    publish_attempt(s, begin(s), &r);
+    publish_attempt(s, begin(s), &r);
     EXPECT_EQ(0U, begin(s));
     batch b;
     ASSERT_TRUE(reader_copy(s, b));
-    EXPECT_EQ(0U, b.count);
-    EXPECT_EQ(8U, b.excluded);
+    EXPECT_EQ(2U, b.count);
+    EXPECT_TRUE(b.records[0].incomplete);
 }
 TEST(rx_layout_capture, close_publishes_partial_and_reuse_changes_generation)
 {
@@ -78,7 +77,7 @@ TEST(rx_layout_capture, close_publishes_partial_and_reuse_changes_generation)
     auto old = s.control.load();
     ASSERT_TRUE(arm(s, old, 2));
     record r {};
-    r.payload_bytes = 42;
+    r.sw_time_ns = 42;
     publish_attempt(s, begin(s), &r);
     xlio_rx_layout::close(s);
     EXPECT_FALSE(register_slot(s, 2, 2));
@@ -86,7 +85,7 @@ TEST(rx_layout_capture, close_publishes_partial_and_reuse_changes_generation)
     ASSERT_TRUE(reader_copy(s, b));
     EXPECT_TRUE(b.closed);
     EXPECT_EQ(1U, b.count);
-    EXPECT_EQ(42U, b.records[0].payload_bytes);
+    EXPECT_EQ(42U, b.records[0].sw_time_ns);
     ASSERT_TRUE(register_slot(s, 2, 2));
     EXPECT_FALSE(arm(s, old, 1));
     EXPECT_NE(old >> 32, s.control.load() >> 32);
@@ -112,13 +111,13 @@ TEST(rx_layout_capture, close_during_read_keeps_records_pinned)
     ASSERT_TRUE(register_slot(s, 1, 1));
     ASSERT_TRUE(arm(s, s.control.load(), 1));
     record r {};
-    r.payload_bytes = 99;
+    r.sw_time_ns = 99;
     publish_attempt(s, begin(s), &r);
     uint64_t token;
     ASSERT_TRUE(reader_claim(s, token));
     xlio_rx_layout::close(s);
     EXPECT_FALSE(register_slot(s, 2, 2));
-    EXPECT_EQ(99U, s.records[0].payload_bytes);
+    EXPECT_EQ(99U, s.records[0].sw_time_ns);
     reader_release(s);
     EXPECT_TRUE(register_slot(s, 2, 2));
 }
@@ -151,8 +150,8 @@ TEST(rx_layout_capture, shared_mapping_publishes_complete_records_between_proces
         for (unsigned i = 0; i < capacity; ++i) {
             record r {};
             r.frame_bytes = i;
-            r.payload_bytes = i ^ 0x12345678U;
-            r.payload_offset = i ^ 0x87654321U;
+            r.sw_time_ns = i ^ 0x12345678U;
+            r.cqe[0] = (i ^ 0x87654321U) & 255U;
             publish_attempt(*s, begin(*s), &r);
         }
         _exit(0);
@@ -170,8 +169,8 @@ TEST(rx_layout_capture, shared_mapping_publishes_complete_records_between_proces
     ASSERT_EQ(capacity, b.count);
     for (unsigned i = 0; i < capacity; ++i) {
         EXPECT_EQ(i, b.records[i].frame_bytes);
-        EXPECT_EQ(i ^ 0x12345678U, b.records[i].payload_bytes);
-        EXPECT_EQ(i ^ 0x87654321U, b.records[i].payload_offset);
+        EXPECT_EQ(i ^ 0x12345678U, b.records[i].sw_time_ns);
+        EXPECT_EQ((i ^ 0x87654321U) & 255U, b.records[i].cqe[0]);
     }
     s->~slot();
     EXPECT_EQ(0, munmap(memory, sizeof(slot)));
@@ -200,8 +199,8 @@ TEST(rx_layout_capture, repeated_process_handoffs_do_not_mix_batches)
             for (unsigned i = 0; i < capacity; ++i) {
                 record r {};
                 r.frame_bytes = round;
-                r.payload_bytes = i;
-                r.payload_offset = round ^ i ^ 0x87654321U;
+                r.sw_time_ns = i;
+                r.cqe[0] = ((round ^ i ^ 0x87654321U) & 255U);
                 publish_attempt(*s, token, &r);
             }
         }
@@ -219,8 +218,8 @@ TEST(rx_layout_capture, repeated_process_handoffs_do_not_mix_batches)
         valid = valid && copied && b.count == capacity && b.sequence == round + 1;
         for (unsigned i = 0; i < b.count && valid; ++i) {
             const auto &r = b.records[i];
-            valid = r.frame_bytes == round && r.payload_bytes == i &&
-                r.payload_offset == (round ^ i ^ 0x87654321U);
+            valid = r.frame_bytes == round && r.sw_time_ns == i &&
+                r.cqe[0] == (((round ^ i ^ 0x87654321U) & 255U));
         }
     }
     if (!valid) {

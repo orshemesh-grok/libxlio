@@ -61,49 +61,102 @@ Log only sockets that match list or range, format: 4-16 or 1,9 (or combination).
 Print version.
 .TP
 
-.SH RX LAYOUT CAPTURE
-Use --rx-layout with -p to request bounded TCP receive-layout batches:
-.PP
+.SH RX ANALYSIS
+Use --rx-analysis with -p to request bounded receive analysis batches:
 .nf
-xlio_stats -p PID --rx-layout --rx-samples 256 -i 1 -c 10
+xlio_stats -p PID --rx-analysis --rx-samples 256 -i 1 -c 10 --csv_file packets.csv
 .fi
+.nf
+
+RX analysis (--rx-analysis, optionally -C/--csv_file PATH):
+  --rx-samples N sets a maximum of N packet completions per ring per batch,
+  including excluded packets. Storage is fixed at 256 records per ring.
+  An LRO aggregate is one completion, not a sample of every wire segment.
+  Captures run only when requested. No traffic / Collecting samples describes
+  an empty / partial batch; closing a ring publishes its partial batch.
+  All sizes are bytes. Histograms group identical layouts and reasons:
+    Count/Share: frequency / percentage of all records in that ring batch.
+    RQ: STRQ (striding) or RQ (regular). IP: IP version.
+    LRO: raw CQE segment count; 0=no session, 1=one-packet session, >1=aggregate.
+    Prefix: bytes before Ethernet; Hdr: L2+IP+TCP lengths, excluding Prefix.
+    L2/IP/TCP: individual header lengths, including tags/options/extensions.
+    Frame: completed Ethernet frame size; Payload: aggregate TCP payload size.
+    Offset: payload offset from the posted slot start, including Prefix.
+    A%64/L%64: payload address / payload length modulo 64. Flags: raw TCP flags.
+    lro_abrt: HW completion reason: 0:max-size, 1:timeout, 2:exception,
+      3:undefined; '-' for LRO=0. A session's triggering packet is generally
+      not part of the aggregate. This column is not a SW-inferred flush cause.
+    lro disq: '-' for LRO>0, otherwise all identified observed disqualifiers,
+      or 'unknown'. These are inferences from sampled packets and effective
+      LRO settings, NOT HW session state or proof of the NIC's actual decision.
+      'not validated' CQE bits do not prove a bad checksum. Resource exhaustion
+      and unsampled packets cannot be diagnosed. Padding NOP/EOL is allowed.
+    Excluded: packets without a safely interpretable complete TCP layout;
+      separate histogram, included in the requested count and CSV.
+    Data/control-only: TCP packets with/without payload. Alignment percentages
+      use data packets only. Missing or unavailable values are '-'.
+  CSV: one row per captured completion, including excluded records, in each
+  ring's capture order. No global packet ordering across rings is implied.
+    batch: display update number; ring-id/ring-generation/ifindex: RX identity.
+    flow-id: small directional-flow ID retained across batches; tuple: interface,
+      source/destination IP:port and VLAN context. Bounded to 4096 active IDs;
+      an evicted tuple receives a new ID. These fields are calculated by xlio_stats.
+    expected-seqno: previous observed sequence + aggregate payload + SYN + FIN,
+      modulo 2^32, calculated by xlio_stats. '-' on the first flow packet in
+      each batch, ring change, SYN, or after lost/malformed context. No inference
+      spans sampling gaps. Observed FIN/RST ends continuity.
+    sw-time-ns: CLOCK_MONOTONIC_RAW when SW processes the completion, before
+      header repair; includes polling delay and is NOT wire-arrival time.
+    Incomplete/incomplete: some requested header/metadata information was not recorded.
+      IPv4 option / IPv6 extension bodies are omitted; only extension types
+      are kept. Omitted application payload does not set this boolean.
+    rq/headers-64: queue kind / active header-layout setting.
+    frame-bytes/prefix-bytes/frame-address-mod64: actual RX buffer layout.
+    l2-bytes/ip-bytes/tcp-bytes: decoded header sizes (ip-bytes means header).
+    payload-bytes/payload-offset/payload-address-mod64/payload-length-mod64:
+      decoded layout as in the histogram, using completion length for LRO>1.
+    ethernet-header/ip-header/tcp-header/tcp-options/ipv6-extension-types:
+      bounded raw bytes in hex, before XLIO repairs LRO headers. IP base header
+      only; TCP includes up to 40 option bytes. No packet payload is recorded.
+    ip-version/ip-dscp-ecn: version and combined DSCP+ECN byte.
+    ipv4-total-length/ipv4-id/ipv4-frag/ipv4-checksum: raw IPv4 header fields;
+      frag includes flags and fragment offset. ipv6-flow-label/ipv6-payload-length:
+      raw IPv6 fields. ip-ttl-hop-limit / ip-protocol-next-header: corresponding
+      raw base-IP fields. Source/destination addresses are also in tuple.
+    src-port/dst-port/seqno/ackno: raw TCP fields; tcp-doff-reserved-ns is the
+      raw byte containing data offset, reserved bits and NS. tcp-flags/window/
+      checksum/urgent: raw TCP flags, advertised window, checksum and urgent pointer.
+    cqe: raw 64-byte CQE in hex. cqe-* columns expose raw fields as unsigned
+      numbers: pkt-info (packet info), lro-tcppsh-abort-dupack (packed LRO flags,
+      abort and dupack), min-ttl (minimum TTL), tcp-window/ack-seq (LRO final values),
+      rx-hash/rx-hash-type, csum (HW checksum), hds-ip-ext (validation bits),
+      l4-hdr-type-etc (types/fragment/extension/VLAN flags), vlan-info (TCI),
+      byte-count (raw, including STRQ encoding), timestamp (64-bit raw union:
+      TCP timestamp values when LRO timestamp-valid is set, otherwise CQ clock),
+      flow-table-metadata, sop-rxdrop-qpn-flowtag (packed metadata), wqe-counter,
+      op-own (opcode/ownership). Interpretation depends on opcode and validity
+      bits; zero in a raw union does not imply that every subfield is applicable.
+    lro-enable-mask: effective TIR IPv4=1/IPv6=2; lro-min-mss: device minimum
+      TCP payload; lro-psh-cap/lro-timestamp-cap: device support booleans;
+      lro-max-size: configured size limit; lro-max-size-mode: 0=TCP header+data,
+      1=whole frame; lro-timeout-us: TIR timeout. Unknown context is '-'.
+
+.fi
+
 .PP
---rx-samples selects 1 to 256 records per ring (default 256).
-The interval must be at least one second. -c counts display updates, including
-updates without samples; zero means unlimited updates. Capture cannot be combined
-with view, detail, socket-filter, CSV, logging, counter-reset or dump options.
+The target must provide this version of the capture extension. Write access to
+its statistics file is required. One capture reader may hold the exclusive file
+lock; ordinary statistics readers can run concurrently. Capture cannot be combined
+with view, details, socket-filter, logging, reset or dump options. The interval
+must be at least one second; -c counts display updates (zero means unlimited).
 .PP
-The target must use a library with the capture extension. Capture requires write
-access to its statistics file. Only one capture reader can hold the file lock;
-ordinary statistics readers can run concurrently without requesting captures.
-.PP
-Before any eligible samples arrive, the view prints "No traffic". A partial batch
-prints "Collecting samples (n/N)" and persists across updates. Each request inspects
-at most four times the requested number of successful, non-filler completions;
-unsupported or malformed packets count as excluded. That inspection limit, or a
-ring closing, can publish a short or empty batch. CQ errors and STRQ fillers are
-not inspected and are not included in the excluded count.
-.PP
-Tables show common layouts ordered by sample count. Prefix is the space before
-Ethernet; Hdr is L2 + IP + TCP bytes, excluding Prefix. Frame is the normalized
-completion length, excluding the prefix but possibly including Ethernet padding.
-Payload is derived from IP and TCP lengths and excludes Ethernet padding.
-Offset is the payload position relative to the receive slot. A%64 is the actual
-payload address modulo 64; L%64 is payload length modulo 64. Data alignment
-percentages exclude control-only packets. LRO identifies the aggregate segment
-count, normalized to one for a non-aggregated completion.
-.PP
-These are RX completion samples, taken before software GRO. They are not PCIe
-transaction sizes or on-wire sizes including FCS/preamble. LRO aggregates do not
-reveal every constituent segment's length or alignment. Percentages describe each
-ring's short sampled burst, not its traffic over the entire display interval.
-.PP
-Capture adds one state check per eligible completion while inactive. Only an
-outstanding request enables diagnostic parsing and record writes. If the reader
-exits, the outstanding bounded batch can finish; a later reader adopts it.
-There are 16 capture slots per process. Retired unread slots remain pinned until
-a reader consumes them. Rings denied a slot continue normal networking but remain
-unsampled for their lifetime; the view reports the registration failure count.
+Capture adds a state check to each successful packet completion while inactive.
+If a reader exits, its bounded request may finish and be adopted by a later reader.
+There are 16 capture slots per process. Closed unread slots stay pinned until
+consumed; rings denied a slot continue networking but remain unsampled. The view
+reports coverage limitations. Samples are completion layouts, not PCIe transaction
+sizes or wire sizes including FCS/preamble. Percentages describe sampled bursts,
+not all traffic during the display interval.
 
 .SH SEE ALSO
 .BR xlio (7)

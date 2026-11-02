@@ -122,15 +122,15 @@ void cq_mgr_rx_regrq::cqe_to_mem_buff_desc(struct xlio_mlx5_cqe *cqe,
         p_rx_wc_buf_desc->rx.is_sw_csum_need =
             !(m_b_is_rx_hw_csum_on && (cqe->hds_ip_ext & MLX5_CQE_L4_OK) &&
               (cqe->hds_ip_ext & MLX5_CQE_L3_OK));
+        xlio_rx_layout::capture_sample(m_p_ring->get_rx_layout_capture(),
+                                       p_rx_wc_buf_desc->p_buffer, p_rx_wc_buf_desc->sz_data,
+                                       p_rx_wc_buf_desc->p_buffer, safe_mce_sys().headers_64, false,
+                                       cqe, m_rx_analysis_context);
         if (cqe->lro_num_seg > 1) {
             lro_update_hdr(cqe, p_rx_wc_buf_desc);
             m_p_cq_stat->n_rx_lro_packets++;
             m_p_cq_stat->n_rx_lro_bytes += p_rx_wc_buf_desc->sz_data;
         }
-        xlio_rx_layout::capture_sample(m_p_ring->get_rx_layout_capture(),
-                                       p_rx_wc_buf_desc->p_buffer, p_rx_wc_buf_desc->sz_data,
-                                       p_rx_wc_buf_desc->p_buffer, safe_mce_sys().headers_64, false,
-                                       cqe->lro_num_seg);
         return;
     }
     case MLX5_CQE_INVALID: /* No cqe!*/

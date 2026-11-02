@@ -26,19 +26,29 @@ inline uint64_t with_state(uint64_t token, phase p)
 {
     return (token & ~0xffULL) | uint64_t(p);
 }
+// Fixed, bounded header snapshots. Packet and CQE byte arrays retain wire/device
+// byte order. No payload, inferred disqualifier or flow state is collected here.
 struct record {
-    uint32_t frame_bytes, payload_bytes, payload_offset;
-    uint16_t l2_bytes, l3_bytes, tcp_bytes, prefix_bytes, lro_segments;
-    uint8_t payload_mod64, striding, tcp_flags, ip_version;
-    uint16_t reserved;
-    uint32_t reserved2;
+    uint64_t sw_time_ns = 0;
+    uint32_t frame_bytes = 0;
+    uint16_t prefix_bytes = 0, l3_bytes = 0;
+    uint8_t frame_mod64 = 0, striding = 0, headers_64 = 0, incomplete = 0;
+    uint8_t eth_len = 0, ip_len = 0, tcp_len = 0, ext_count = 0;
+    uint8_t cqe_valid = 0;
+    uint8_t ethernet[30] = {}, ip[40] = {}, tcp[60] = {}, extensions[8] = {}, cqe[64] = {};
 };
-static_assert(sizeof(record) == 32, "RX layout record ABI");
+struct receive_context {
+    uint32_t max_lro_bytes = 0, timeout_us = 0;
+    uint16_t min_mss = 0;
+    uint8_t enable_mask = 0, psh = 0, timestamp = 0, max_size_mode = 0;
+    uint8_t caps_known = 0, tir_known = 0;
+};
 struct alignas(64) slot {
     std::atomic<uint64_t> control {0};
     std::atomic<uint32_t> progress {0}, inspected {0}, excluded {0};
     uint32_t if_index = 0;
     uint64_t ring_id = 0, sequence = 0;
+    receive_context context {};
     std::array<record, capacity> records {};
 };
 struct batch {
@@ -46,6 +56,7 @@ struct batch {
     uint32_t if_index = 0;
     unsigned count = 0, requested = 0, inspected = 0, excluded = 0;
     bool closed = false;
+    receive_context context {};
     std::array<record, capacity> records {};
 };
 
@@ -105,18 +116,13 @@ inline uint64_t begin(slot &s)
 inline void publish_attempt(slot &s, uint64_t token, const record *sample)
 {
     auto count = s.progress.load(std::memory_order_relaxed);
-    if (sample) {
-        s.records[count++] = *sample;
-        s.progress.store(count, std::memory_order_release);
-    } else {
-        s.excluded.store(s.excluded.load(std::memory_order_relaxed) + 1U,
-                         std::memory_order_relaxed);
+    if (!sample || count >= target(token) || count >= capacity) {
+        return;
     }
-    auto attempts = s.inspected.load(std::memory_order_relaxed) + 1U;
-    s.inspected.store(attempts, std::memory_order_relaxed);
-    // Unsupported traffic cannot keep an abandoned request collecting
-    // indefinitely.
-    if (count == target(token) || attempts == 4U * target(token)) {
+    s.records[count++] = *sample;
+    s.progress.store(count, std::memory_order_release);
+    s.inspected.store(count, std::memory_order_relaxed);
+    if (count == target(token)) {
         s.control.store(with_state(token, phase::ready), std::memory_order_release);
     }
 }
@@ -175,6 +181,7 @@ inline bool reader_copy(slot &s, batch &out)
     if (!reader_claim(s, token)) {
         return false;
     }
+    out.context = s.context;
     out.ring_id = s.ring_id;
     out.if_index = s.if_index;
     out.generation = token >> 32;
@@ -208,7 +215,7 @@ inline void recover_reader(slot &s)
 }
 
 constexpr uint64_t magic = 0x584c494f52584c31ULL;
-constexpr uint32_t version = 1;
+constexpr uint32_t version = 2;
 struct alignas(64) region {
     std::atomic<uint64_t> signature {0};
     uint32_t abi_version = version;

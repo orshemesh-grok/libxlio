@@ -12,6 +12,7 @@
 #include "dev/ib_ctx_handler.h"
 #include "util/sys_vars.h"
 #include "util/xlio_stats.h"
+#include "util/rx_layout_capture.h"
 #include "proto/mem_buf_desc.h"
 #include "proto/xlio_lwip.h"
 #include "xlio_extra.h"
@@ -108,6 +109,7 @@ public:
     uint64_t get_n_rx_hw_pkt_drops() { return m_p_cq_stat->n_rx_hw_pkt_drops; }
 
 protected:
+    xlio_rx_layout::receive_context m_rx_analysis_context {};
     /**
      * Poll the CQ that is managed by this object
      * @p_wce pointer to array where to save the wce in

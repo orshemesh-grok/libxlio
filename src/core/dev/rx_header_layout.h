@@ -33,15 +33,14 @@ inline bool rx_parse_l2_header(const uint8_t *frame, size_t size, bool headers_6
     }
     header = {ETH_HLEN, rx_header_u16(frame + 12), 0};
     if (headers_64) {
-        // Receive steering inserts exactly these two VLAN tags after the MACs.
-        // Validate and ignore only our tags; preserve any original VLAN semantics.
+        // Steering always inserts a zero-TCI S-tag. The inner C-tag is either
+        // the original customer tag or a zero-TCI tag added to an untagged frame.
         if (size < ETH_HLEN + 8U || header.protocol != htons(ETH_P_8021AD) ||
-            rx_header_u16(frame + 14) != 0 || rx_header_u16(frame + 16) != htons(ETH_P_8021Q) ||
-            rx_header_u16(frame + 18) != 0) {
+            rx_header_u16(frame + 14) != 0 || rx_header_u16(frame + 16) != htons(ETH_P_8021Q)) {
             return false;
         }
-        header.length += 8U;
-        header.protocol = rx_header_u16(frame + 20);
+        header.length += 4U;
+        header.protocol = rx_header_u16(frame + 16);
     }
     if (header.protocol == htons(ETH_P_8021Q)) {
         if (size < header.length + 4U) {
@@ -50,6 +49,11 @@ inline bool rx_parse_l2_header(const uint8_t *frame, size_t size, bool headers_6
         header.vlan_id = ntohs(rx_header_u16(frame + header.length)) & 0x0FFFU;
         header.protocol = rx_header_u16(frame + header.length + 2U);
         header.length += 4U;
+    }
+    // Existing stacked tags are outside this mode's two-tag layout contract.
+    if (headers_64 && (header.protocol == htons(ETH_P_8021Q) ||
+                       header.protocol == htons(ETH_P_8021AD))) {
+        return false;
     }
     return true;
 }

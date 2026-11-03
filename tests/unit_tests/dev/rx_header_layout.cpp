@@ -51,16 +51,39 @@ TEST(rx_header_layout, synthetic_tags_preserve_payload_alignment)
     EXPECT_EQ(0x5a, frame[result.length + 40]);
 }
 
-TEST(rx_header_layout, preserve_customer_vlan_after_synthetic_tags)
+TEST(rx_header_layout, preserve_customer_vlan_with_one_synthetic_tag)
+{
+    for (uint16_t tci : {uint16_t(0), uint16_t(0xa000), uint16_t(123), uint16_t(0xb07b)}) {
+        alignas(64) uint8_t storage[128] = {};
+        uint8_t *frame = storage + 2;
+        const uint8_t tags[] = {0x88, 0xa8, 0, 0, 0x81, 0,
+                               uint8_t(tci >> 8), uint8_t(tci), 8, 0};
+        std::memcpy(frame + 12, tags, sizeof(tags));
+        rx_l2_header result;
+        ASSERT_TRUE(rx_parse_l2_header(frame, 22, true, result)) << tci;
+        EXPECT_EQ(22U, result.length);
+        EXPECT_EQ(tci & 0x0fffU, result.vlan_id);
+        EXPECT_EQ(htons(ETH_P_IP), result.protocol);
+        EXPECT_EQ(storage + 64, frame + result.length + 40);
+        EXPECT_EQ(0, std::memcmp(frame + 12, tags, sizeof(tags)));
+        frame[20] = 0x86;
+        frame[21] = 0xdd;
+        ASSERT_TRUE(rx_parse_l2_header(frame, 22, true, result));
+        EXPECT_EQ(htons(ETH_P_IPV6), result.protocol);
+        EXPECT_EQ(tci & 0x0fffU, result.vlan_id);
+    }
+}
+
+TEST(rx_header_layout, reject_more_than_two_tags_in_headers64_mode)
 {
     uint8_t frame[64] = {};
-    const uint8_t tags[] = {0x88, 0xa8, 0, 0, 0x81, 0, 0, 0, 0x81, 0, 0, 123, 0x86, 0xdd};
+    const uint8_t tags[] = {0x88, 0xa8, 0, 0, 0x81, 0, 0, 0, 0x81, 0, 0, 123, 8, 0};
     std::memcpy(frame + 12, tags, sizeof(tags));
     rx_l2_header result;
-    ASSERT_TRUE(rx_parse_l2_header(frame, sizeof(frame), true, result));
-    EXPECT_EQ(26U, result.length);
-    EXPECT_EQ(123U, result.vlan_id);
-    EXPECT_EQ(htons(ETH_P_IPV6), result.protocol);
+    EXPECT_FALSE(rx_parse_l2_header(frame, sizeof(frame), true, result));
+    frame[20] = 0x88;
+    frame[21] = 0xa8;
+    EXPECT_FALSE(rx_parse_l2_header(frame, sizeof(frame), true, result));
 }
 
 TEST(rx_header_layout, reject_truncated_or_missing_synthetic_tags)
@@ -73,7 +96,7 @@ TEST(rx_header_layout, reject_truncated_or_missing_synthetic_tags)
         EXPECT_FALSE(rx_parse_l2_header(frame, size, true, result)) << size;
     }
     ASSERT_TRUE(rx_parse_l2_header(frame, 22, true, result));
-    for (size_t offset : {12U, 13U, 14U, 15U, 16U, 17U, 18U, 19U}) {
+    for (size_t offset : {12U, 13U, 14U, 15U, 16U, 17U}) {
         frame[offset] ^= 1;
         EXPECT_FALSE(rx_parse_l2_header(frame, sizeof(frame), true, result)) << offset;
         frame[offset] ^= 1;

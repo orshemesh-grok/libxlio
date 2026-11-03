@@ -136,7 +136,7 @@ bool rfs_rule::create_headers_table(dpcp::tir &tir, uint32_t flow_tag, dpcp::ada
     table_attr.type = dpcp::FT_RX;
     table_attr.level =
         std::min<uint32_t>(caps.flow_table_caps.receive.max_flow_table_level - 1U, UINT8_MAX);
-    table_attr.log_size = 0; // One FTE, matching everything already selected by the root rule.
+    table_attr.log_size = 1; // Untagged and customer-tagged packets use different insertions.
     if (adapter.create_flow_table(table_attr, _headers_table) != dpcp::DPCP_OK || !_headers_table ||
         _headers_table->create() != dpcp::DPCP_OK) {
         rfs_logerr("headers-64 failed to create receive insertion table");
@@ -144,6 +144,11 @@ bool rfs_rule::create_headers_table(dpcp::tir &tir, uint32_t flow_tag, dpcp::ada
     }
 
     dpcp::flow_group_attr group_attr;
+    group_attr.end_flow_index = 1;
+    group_attr.match_criteria_enable = dpcp::FG_MATCH_OUTER_HDR;
+    // Match presence, not VID: a priority-tagged frame with VID 0 still has a C-tag.
+    group_attr.match_criteria.match_lyr2.cvlan_tag = 1;
+    group_attr.match_criteria.match_lyr2.svlan_tag = 1;
     std::weak_ptr<dpcp::flow_group> group_ref;
     if (_headers_table->add_flow_group(group_attr, group_ref) != dpcp::DPCP_OK ||
         group_ref.expired() || group_ref.lock()->create() != dpcp::DPCP_OK) {
@@ -151,35 +156,41 @@ bool rfs_rule::create_headers_table(dpcp::tir &tir, uint32_t flow_tag, dpcp::ada
         return false;
     }
 
-    // Insert QinQ headers immediately after destination/source MAC addresses.
-    // The original EtherType (and any original VLAN) stays after these eight bytes.
+    // Always add an S-tag. Add a C-tag only when none is present, preserving an
+    // existing customer's entire TCI. Both supported inputs reach the TIR with two tags.
     uint8_t vlan_tags[] = {0x88, 0xa8, 0, 0, 0x81, 0, 0, 0};
-    dpcp::flow_action_reformat_attr insert_attr {};
-    insert_attr.insert.type = dpcp::INSERT_HDR;
-    insert_attr.insert.start_hdr = dpcp::MAC_START;
-    insert_attr.insert.offset = 12;
-    insert_attr.insert.data_len = sizeof(vlan_tags);
-    insert_attr.insert.data = vlan_tags;
     auto &generator = adapter.get_flow_action_generator();
-    _headers_actions = {generator.create_reformat(insert_attr), generator.create_reparse(),
-                        generator.create_fwd({&tir})};
-    if (flow_tag) {
-        _headers_actions.push_back(generator.create_tag(flow_tag));
-    }
-    for (const auto &action : _headers_actions) {
-        if (!action) {
-            rfs_logerr("headers-64 failed to allocate receive insertion action");
+    for (uint32_t tagged = 0; tagged != 2; ++tagged) {
+        dpcp::flow_action_reformat_attr insert_attr {};
+        insert_attr.insert.type = dpcp::INSERT_HDR;
+        insert_attr.insert.start_hdr = dpcp::MAC_START;
+        insert_attr.insert.offset = 12;
+        insert_attr.insert.data_len = tagged ? 4 : sizeof(vlan_tags);
+        insert_attr.insert.data = vlan_tags;
+        std::vector<std::shared_ptr<dpcp::flow_action>> actions {
+            generator.create_reformat(insert_attr), generator.create_reparse(),
+            generator.create_fwd({&tir})};
+        if (flow_tag) {
+            actions.push_back(generator.create_tag(flow_tag));
+        }
+        for (const auto &action : actions) {
+            if (!action) {
+                rfs_logerr("headers-64 failed to allocate receive insertion action");
+                return false;
+            }
+        }
+        dpcp::flow_rule_attr_ex rule_attr;
+        rule_attr.flow_index = tagged;
+        rule_attr.match_value.match_lyr2.cvlan_tag = tagged;
+        rule_attr.actions = actions;
+        std::weak_ptr<dpcp::flow_rule_ex> rule;
+        if (group_ref.lock()->add_flow_rule(rule_attr, rule) != dpcp::DPCP_OK || rule.expired() ||
+            rule.lock()->create() != dpcp::DPCP_OK) {
+            rfs_logerr("headers-64 failed to install VLAN insertion/reparse/TIR action");
             return false;
         }
+        _headers_actions.insert(_headers_actions.end(), actions.begin(), actions.end());
     }
-    dpcp::flow_rule_attr_ex rule_attr;
-    rule_attr.actions = _headers_actions;
-    std::weak_ptr<dpcp::flow_rule_ex> rule;
-    if (group_ref.lock()->add_flow_rule(rule_attr, rule) != dpcp::DPCP_OK || rule.expired() ||
-        rule.lock()->create() != dpcp::DPCP_OK) {
-        rfs_logerr("headers-64 failed to install VLAN insertion/reparse/TIR action");
-        return false;
-    }
-    rfs_logdbg("headers-64: inserted 88a8:0000 / 8100:0000 before forwarding to TIR");
+    rfs_logdbg("headers-64: add S-tag and add C-tag only for untagged frames");
     return true;
 }

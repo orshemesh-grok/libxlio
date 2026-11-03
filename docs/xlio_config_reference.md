@@ -758,7 +758,7 @@ working set = 10GB → default 10GB is appropriate.
 
 Experimental: insert a synthetic S-tag on receive and add a synthetic C-tag only to untagged packets. Preserve an existing single 802.1Q tag, including its VLAN ID and priority. Both supported inputs have two tags in memory. Requires striding RQ and the paired DPCP two-byte-shift and VLAN-presence matching patches. With Ethernet 14, two VLAN tags 8, IPv4 20 and TCP 20-byte headers plus the two-byte prefix, the payload starts 64 bytes from the stride base. Incoming stacked tags are unsupported. IP/TCP options or IPv6 change the payload offset. LRO append alignment also requires payload lengths divisible by 64.
 
-Prototype limitation: the paired DPCP unconditionally enables the two-byte prefix on striding RQs, even when this boolean is false; XLIO always compensates for that prefix. False disables synthetic VLAN insertion. Regular RQ is unchanged when false. Use only with this worktree's private DPCP build.
+The boolean controls both the two-byte receive prefix and VLAN insertion. When false, neither is enabled and XLIO does not skip a prefix. Regular RQ is unchanged when false. Requires the paired DPCP create_striding_rq overload with the two_byte_shift parameter.
 
 **Default:** `false`
 

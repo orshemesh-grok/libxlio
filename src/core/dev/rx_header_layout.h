@@ -51,8 +51,8 @@ inline bool rx_parse_l2_header(const uint8_t *frame, size_t size, bool headers_6
         header.length += 4U;
     }
     // Existing stacked tags are outside this mode's two-tag layout contract.
-    if (headers_64 && (header.protocol == htons(ETH_P_8021Q) ||
-                       header.protocol == htons(ETH_P_8021AD))) {
+    if (headers_64 &&
+        (header.protocol == htons(ETH_P_8021Q) || header.protocol == htons(ETH_P_8021AD))) {
         return false;
     }
     return true;
@@ -60,7 +60,7 @@ inline bool rx_parse_l2_header(const uint8_t *frame, size_t size, bool headers_6
 
 inline bool rx_skip_strq_prefix(uint8_t *&buffer, size_t &length, size_t &capacity)
 {
-    // The patched DPCP makes CQE.byte_cnt[15:0] include the two padding bytes.
+    // With two-byte shift enabled, CQE.byte_cnt[15:0] includes the prefix.
     if (!buffer || length < 2U || capacity < length) {
         return false;
     }

@@ -229,10 +229,9 @@ inline bool cq_mgr_rx_strq::strq_cqe_to_mem_buff_desc(struct xlio_mlx5_cqe *cqe,
 
         const uint8_t *capture_slot_start = _hot_buffer_stride->p_buffer;
 
-        // The private DPCP enables the prefix for every STRQ, independently of
-        // headers_64. Parent WQE ownership, consumed bytes and refcounts remain in
-        // full strides.
-        if (!is_filler &&
+        // Skip the prefix only when requested at RQ creation. Parent WQE
+        // ownership, consumed bytes and refcounts remain in full strides.
+        if (!is_filler && safe_mce_sys().headers_64 &&
             !rx_skip_strq_prefix(_hot_buffer_stride->p_buffer, _hot_buffer_stride->sz_data,
                                  _hot_buffer_stride->sz_buffer)) {
             status = BS_GENERAL_ERR;

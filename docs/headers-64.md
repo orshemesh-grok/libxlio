@@ -43,8 +43,10 @@ Insertion happens on receive; the sender and packets on the wire are unchanged.
 DPCP must expose independent `cvlan_tag`/`svlan_tag` masks and values in its
 extended matcher. Rebuild XLIO against the matching DPCP headers and library.
 
-DPCP sets `WQ.two_byte_shift_en=1` for striding RQs. Hardware writes two zero bytes
-before the Ethernet frame. On this BF4, the striding CQE byte count includes those
+XLIO passes `headers-64` to the DPCP `create_striding_rq` overload as its
+`two_byte_shift` parameter. When true, DPCP sets `WQ.two_byte_shift_en=1`.
+Hardware writes two zero bytes before the Ethernet frame. On this BF4, the
+striding CQE byte count includes those
 two bytes. XLIO subtracts them from the descriptor length/capacity and advances
 its packet pointer, while keeping parent WQE accounting and refcounts in full
 hardware strides. No payload data is copied or moved.
@@ -68,14 +70,18 @@ helper is used by LRO header repair, CQ drain classification, flow-tag dispatch,
 and ordinary receive dispatch. LRO IP-length repair uses the normalized descriptor
 length, excluding the two-byte prefix and the CQE stride-count bits.
 
-### Prototype boundary requested for this branch
+### Shift selection
 
-The private DPCP patch **always enables the two-byte prefix for striding RQs**.
-Accordingly, XLIO always removes that prefix, including when `headers-64=false`.
-The boolean currently gates VLAN insertion and interpretation. Gating the hardware
-shift itself on this boolean is deferred to productization. Do not mix this XLIO
-with an unpatched DPCP, or this DPCP with an XLIO that does not normalize the prefix.
-Regular RQs are unchanged with the boolean false; true with regular RQ is rejected.
+`headers-64` controls both the two-byte hardware prefix and VLAN insertion.
+When false, XLIO requests no prefix, inserts no tags, and leaves the receive
+buffer pointer and CQE length unchanged. When true, it requests the prefix and
+removes it before packet parsing, sampling and LRO header repair. Fillers and
+error CQEs do not pass through prefix removal. Full-stride accounting is unchanged.
+
+The original two-argument DPCP `create_striding_rq` API remains available and
+selects no shift. The new three-argument overload accepts `bool two_byte_shift`.
+Build XLIO with this updated DPCP API. Regular RQs are unchanged with the boolean
+false; true with regular RQ is rejected.
 
 The 64-byte calculation supports untagged and single-802.1Q inputs, with no IPv4
 or TCP options. IPv6 and IP/TCP options change the payload offset. Incoming QinQ
@@ -91,10 +97,11 @@ and performance effects have not been characterized.
 ## DPCP dependency and reproducible build
 
 The paired dependency is `/root/libdpcp-shift-steer`, branch `two-byte-shift`.
-It contains the two-byte receive shift, legacy flow-rule table destinations, and
-independent VLAN-presence matching in `match_params_lyr_2`. The old two patches
-under `contrib/patches/` do not include the VLAN-presence API; applying only those
-patches is insufficient for this version of XLIO.
+It contains the selectable two-byte receive shift, legacy flow-rule table
+destinations, and independent VLAN-presence matching in `match_params_lyr_2`.
+The old two patches under `contrib/patches/` do not include the VLAN-presence API
+or selectable shift; applying only those patches is insufficient for this
+version of XLIO.
 
 The VLAN-presence fields change DPCP's public structure layout. Rebuild consumers
 against the updated headers and library together. Do not run an older XLIO or
@@ -108,7 +115,7 @@ cd /root/libdpcp-shift-steer
 ./configure --prefix=/root/libdpcp-shift-steer/install --enable-shared --enable-static
 make -j8
 make -C tests/gtest -j8
-tests/gtest/gtest --gtest_filter='dpcp_flow_matcher.*'
+tests/gtest/gtest --gtest_filter='dpcp_flow_matcher.*:dpcp_rq.two_byte_shift_selection'
 make install
 
 cd /root/libxlio-shift-steer

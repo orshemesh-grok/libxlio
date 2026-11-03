@@ -536,7 +536,7 @@ bool hw_queue_rx::prepare_rq(uint32_t cqn)
         rqattrs.wqe_sz = m_rx_sge * 16U;
 
         dpcp::striding_rq *new_rq_ptr = nullptr;
-        rc = dpcp_adapter->create_striding_rq(rqattrs, new_rq_ptr);
+        rc = dpcp_adapter->create_striding_rq(rqattrs, new_rq_ptr, safe_mce_sys().headers_64);
         new_rq.reset(new_rq_ptr);
     } else {
         dpcp::regular_rq *new_rq_ptr = nullptr;

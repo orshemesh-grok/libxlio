@@ -249,6 +249,9 @@ void cq_mgr_tx::handle_sq_wqe_prop(unsigned index)
 
     do {
         if (p->buf) {
+            m_hqtx_ptr->trace_packet(
+                p - m_hqtx_ptr->m_sq_wqe_idx_to_prop,
+                p->buf->m_flags & mem_buf_desc_t::HAD_CQE_ERROR ? "TX_ERROR" : "TX_DONE");
             m_p_ring->mem_buf_desc_return_single_locked(p->buf);
         }
         if (p->ti) {

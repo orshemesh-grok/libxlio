@@ -183,6 +183,7 @@ private:
     void destroy_tis_cache();
     void put_tls_tis_in_cache(xlio_tis *tis);
 
+    void trace_packet(unsigned index, const char *event);
     void send_to_wire(xlio_ibv_send_wr *p_send_wqe, xlio_wr_tx_packet_attr attr, bool request_comp,
                       xlio_tis *tis, unsigned credits);
 

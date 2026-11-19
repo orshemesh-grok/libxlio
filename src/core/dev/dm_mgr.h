@@ -21,6 +21,10 @@ class ib_ctx_handler;
 class dm_mgr {
 public:
     dm_mgr();
+    ibv_dm *lookup_device_memory(uint32_t key) const
+    {
+        return m_p_dm_mr && m_p_dm_mr->lkey == key ? m_p_ibv_dm : nullptr;
+    }
     bool allocate_resources(ib_ctx_handler *ib_ctx, ring_stats_t *ring_stats);
     void release_resources();
     bool copy_data(struct mlx5_wqe_data_seg *seg, uint8_t *src, uint32_t length,
@@ -45,6 +49,7 @@ private:
 /* cppcheck-suppress ctuOneDefinitionRuleViolation */
 class dm_mgr {
 public:
+    void *lookup_device_memory(uint32_t) const { return nullptr; }
     inline bool allocate_resources(ib_ctx_handler *ib_ctx, ring_stats_t *ring_stats)
     {
         NOT_IN_USE(ib_ctx);

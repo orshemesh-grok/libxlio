@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: GPL-2.0-only or BSD-2-Clause
  */
 
+#include "config.h"
+#include "dev/tx_packet_snapshot.h"
 #include <algorithm>
 #include <sys/mman.h>
 #include <netinet/ip.h>
@@ -750,6 +752,17 @@ inline int hw_queue_tx::fill_wqe_lso(xlio_ibv_send_wr *pswr, int data_len)
     return wqe_size;
 }
 
+// The SQ credits keep the posted WQE and its DMA buffers live through retirement.
+void hw_queue_tx::trace_packet(unsigned index, const char *event)
+{
+    if (!tx_snapshot::reserve_event()) {
+        return;
+    }
+    const auto *base = reinterpret_cast<const uint8_t *>(m_sq_wqes);
+    tx_snapshot::packet(base, m_sq_wqes_end - base, index * sizeof(mlx5_eth_wqe), m_mlx5_qp.qpn,
+                        event, [&](uint32_t key) { return m_dm_mgr.lookup_device_memory(key); });
+}
+
 //! Send one RAW packet
 void hw_queue_tx::send_to_wire(xlio_ibv_send_wr *p_send_wqe, xlio_wr_tx_packet_attr attr,
                                bool request_comp, xlio_tis *tis, unsigned credits)
@@ -780,8 +793,9 @@ void hw_queue_tx::send_to_wire(xlio_ibv_send_wr *p_send_wqe, xlio_wr_tx_packet_a
     eseg->rsvd2 = 0;
     eseg->cs_flags = (uint8_t)(attr & (XLIO_TX_PACKET_L3_CSUM | XLIO_TX_PACKET_L4_CSUM) & 0xff);
 
-    submit_wqe(reinterpret_cast<mem_buf_desc_t *>(p_send_wqe->wr_id), credits, fill_wqe(p_send_wqe),
-               tis, false);
+    uint8_t blocks = fill_wqe(p_send_wqe);
+    trace_packet(m_sq_wqe_hot_index, "TX_POST");
+    submit_wqe(reinterpret_cast<mem_buf_desc_t *>(p_send_wqe->wr_id), credits, blocks, tis, false);
 }
 
 inline void hw_queue_tx::submit_wqe(mem_buf_desc_t *buf, unsigned credits, uint8_t wqebbs,

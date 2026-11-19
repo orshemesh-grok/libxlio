@@ -230,6 +230,7 @@ libxlio_la_SOURCES := \
 	dev/net_device_table_mgr.h \
 	dev/net_device_val.h \
 	dev/hw_queue_rx.h \
+	dev/tx_packet_snapshot.h \
 	dev/hw_queue_tx.h \
 	dev/rfs.h \
 	dev/rfs_mc.h \
@@ -344,6 +345,7 @@ libxlio_la_SOURCES := \
 	util/sys_vars_types.h \
 	util/to_str.h \
 	util/utils.h \
+	util/tx_snapshot.h \
 	util/valgrind.h \
 	util/xlio_list.h \
 	util/xlio_stats.h \

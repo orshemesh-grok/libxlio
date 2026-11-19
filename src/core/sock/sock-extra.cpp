@@ -5,6 +5,7 @@
  */
 
 #ifdef HAVE_CONFIG_H
+#include "util/tx_snapshot.h"
 #include "config.h"
 #endif
 
@@ -382,6 +383,10 @@ extern "C" void xlio_poll_group_buf_free(xlio_poll_group_t group, struct xlio_bu
 extern "C" int xlio_socket_send(xlio_socket_t sock, const void *data, size_t len,
                                 const struct xlio_socket_send_attr *attr)
 {
+    if ((attr->flags & XLIO_SOCKET_SEND_FLAG_INLINE) && tx_snapshot::reserve_event()) {
+        tx_snapshot::record("API_SEND", 0, 0, static_cast<const unsigned char *>(data),
+                            std::min(len, tx_snapshot::limit), "app", &len);
+    }
     const struct iovec iov = {.iov_base = const_cast<void *>(data), .iov_len = len};
 
     return xlio_socket_sendv(sock, &iov, 1, attr);

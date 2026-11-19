@@ -383,9 +383,19 @@ extern "C" void xlio_poll_group_buf_free(xlio_poll_group_t group, struct xlio_bu
 extern "C" int xlio_socket_send(xlio_socket_t sock, const void *data, size_t len,
                                 const struct xlio_socket_send_attr *attr)
 {
-    if ((attr->flags & XLIO_SOCKET_SEND_FLAG_INLINE) && tx_snapshot::reserve_event()) {
-        tx_snapshot::record("API_SEND", 0, 0, static_cast<const unsigned char *>(data),
-                            std::min(len, tx_snapshot::limit), "app", &len);
+    if (attr->flags & XLIO_SOCKET_SEND_FLAG_INLINE) {
+        if (auto *msg = tx_snapshot::allocate()) {
+            msg->event = "API_SEND";
+            msg->storage = "app";
+            msg->qp = msg->wqe = 0;
+            msg->api_send = true;
+            msg->requested = len;
+            msg->size = std::min(len, tx_snapshot::limit);
+            if (msg->size) {
+                memcpy(msg->bytes, data, msg->size);
+            }
+            tx_snapshot::enqueue(msg);
+        }
     }
     const struct iovec iov = {.iov_base = const_cast<void *>(data), .iov_len = len};
 

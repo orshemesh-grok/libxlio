@@ -67,6 +67,7 @@ dist_noinst_DATA = config/descriptor_providers/xlio_config_schema.json
 
 
 libxlio_la_SOURCES := \
+	util/tx_snapshot.cpp \
 	dev/allocator.cpp \
 	dev/buffer_pool.cpp \
 	dev/cq_mgr_rx.cpp \

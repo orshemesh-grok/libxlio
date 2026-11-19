@@ -755,9 +755,6 @@ inline int hw_queue_tx::fill_wqe_lso(xlio_ibv_send_wr *pswr, int data_len)
 // The SQ credits keep the posted WQE and its DMA buffers live through retirement.
 void hw_queue_tx::trace_packet(unsigned index, const char *event)
 {
-    if (!tx_snapshot::reserve_event()) {
-        return;
-    }
     const auto *base = reinterpret_cast<const uint8_t *>(m_sq_wqes);
     tx_snapshot::packet(base, m_sq_wqes_end - base, index * sizeof(mlx5_eth_wqe), m_mlx5_qp.qpn,
                         event, [&](uint32_t key) { return m_dm_mgr.lookup_device_memory(key); });

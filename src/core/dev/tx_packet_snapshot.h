@@ -3,6 +3,10 @@
  */
 #pragma once
 #include "util/tx_snapshot.h"
+#include <algorithm>
+#include <cerrno>
+#include <cstring>
+#include <unistd.h>
 #include <infiniband/mlx5dv.h>
 #include <netinet/in.h>
 #include <sys/uio.h>
@@ -19,7 +23,11 @@ inline void packet(const uint8_t *base, size_t ring_size, size_t offset_in_ring,
     const unsigned counter = ntohl(ctrl->opmod_idx_opcode) >> 8 & 0xffff;
     const size_t ds_bytes = (ntohl(ctrl->qpn_ds) & 0x3f) * 16U;
     const size_t header_size = ntohs(eth->inline_hdr_sz);
-    uint8_t bytes[tx_snapshot::limit];
+    auto *msg = allocate();
+    if (!msg) {
+        return;
+    }
+    auto &bytes = msg->bytes;
     size_t size = 0;
     size_t offset = sizeof(*ctrl) + offsetof(mlx5_wqe_eth_seg, inline_hdr_start);
     auto ring_offset = [&](size_t pos) { return (offset_in_ring + pos) % ring_size; };
@@ -78,6 +86,12 @@ inline void packet(const uint8_t *base, size_t ring_size, size_t offset_in_ring,
             break;
         }
     }
-    tx_snapshot::record(event, qp, counter, bytes, size, storage);
+    msg->event = event;
+    msg->storage = storage;
+    msg->qp = qp;
+    msg->wqe = counter;
+    msg->size = size;
+    msg->api_send = false;
+    enqueue(msg);
 }
 } //namespace tx_snapshot

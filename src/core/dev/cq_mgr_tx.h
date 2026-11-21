@@ -52,6 +52,7 @@ private:
     void get_cq_event(int count = 1) { xlio_ib_mlx5_get_cq_event(&m_mlx5_cq, count); };
 
     inline struct xlio_mlx5_cqe *get_cqe_tx();
+    void trace_cqe(const xlio_mlx5_cqe *cqe);
 
     xlio_ib_mlx5_cq_t m_mlx5_cq;
     ring_simple *m_p_ring;
@@ -76,6 +77,8 @@ inline struct xlio_mlx5_cqe *cq_mgr_tx::get_cqe_tx()
      */
     while (((cqe->op_own & MLX5_CQE_OWNER_MASK) == !!(m_mlx5_cq.cq_ci & m_mlx5_cq.cqe_count)) &&
            ((cqe->op_own >> 4) != MLX5_CQE_INVALID)) {
+        rmb();
+        trace_cqe(cqe);
         ++m_mlx5_cq.cq_ci;
         cqe_ret = cqe;
         if (unlikely(cqe->op_own & 0x80)) {

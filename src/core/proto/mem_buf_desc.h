@@ -175,6 +175,7 @@ public:
                 void *ctx;
                 void (*callback)(mem_buf_desc_t *);
             } zc;
+            uint16_t dm_owner_wqe; // Diagnostic owner of the current DM charge.
         } tx;
     };
 

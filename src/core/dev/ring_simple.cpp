@@ -478,9 +478,9 @@ void ring_simple::mem_buf_desc_return_single_multi_ref(mem_buf_desc_t *p_mem_buf
 }
 
 // Call under m_lock_ring_tx lock
-void ring_simple::mem_buf_desc_return_single_locked(mem_buf_desc_t *buff)
+void ring_simple::mem_buf_desc_return_single_locked(mem_buf_desc_t *buff, unsigned wqe)
 {
-    put_tx_buffer_helper(buff);
+    put_tx_buffer_helper(buff, wqe);
 }
 
 int ring_simple::drain_and_proccess()
@@ -824,10 +824,10 @@ void ring_simple::return_tx_pool_to_global_pool()
 }
 
 // Returns number of freed buffers.
-int ring_simple::put_tx_buffer_helper(mem_buf_desc_t *buff)
+int ring_simple::put_tx_buffer_helper(mem_buf_desc_t *buff, unsigned wqe)
 {
     if (buff->tx.dev_mem_length) {
-        m_hqtx->dm_release_data(buff);
+        m_hqtx->dm_release_data(buff, wqe);
     }
 
     // Potential race, ref is protected here by ring_tx lock, and in dst_entry_tcp &

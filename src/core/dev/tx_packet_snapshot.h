@@ -42,7 +42,10 @@ inline void packet(const uint8_t *base, size_t ring_size, size_t offset_in_ring,
     copy_inline(offset, header_size);
     offset = (offset + header_size + 15U) & ~size_t(15U);
     const char *storage = "wqe-inline";
-    while (offset < ds_bytes && size < sizeof(bytes)) {
+    size_t frame_offset = header_size;
+    int segment = 0;
+    bool prefix_readable = true;
+    while (offset < ds_bytes) {
         auto *seg = reinterpret_cast<const mlx5_wqe_data_seg *>(base + ring_offset(offset));
         unsigned count = ntohl(seg->byte_count);
         if (count & 0x80000000U) {
@@ -50,41 +53,59 @@ inline void packet(const uint8_t *base, size_t ring_size, size_t offset_in_ring,
             break;
         }
         offset += sizeof(*seg);
-        size_t take = std::min<size_t>(count, sizeof(bytes) - size);
-        if (!take) {
-            continue;
+        auto *part = allocate();
+        if (!part) {
+            break;
         }
-        // Some registered addresses are inaccessible to the CPU. A failed read
-        // must not turn a diagnostic into an application fault.
+        part->event = "TX_SGE";
+        part->stage = event;
+        part->api_send = false;
+        part->qp = qp;
+        part->wqe = counter;
+        part->segment = segment++;
+        part->total = count;
+        part->offset = frame_offset;
+        part->address = be64toh(seg->addr);
+        part->lkey = ntohl(seg->lkey);
+        size_t take = std::min<size_t>(count, limit);
+        part->size = 0;
+        part->read_length = take;
+        part->read_rc = 0;
         int saved = errno;
-        ssize_t n;
 #ifdef DEFINED_IBV_DM
-        auto *dm = get_dm(ntohl(seg->lkey));
-        if (dm) {
-            alignas(4) uint8_t tmp[tx_snapshot::limit];
-            n = ibv_memcpy_from_dm(tmp, dm, be64toh(seg->addr), (take + 3U) & ~size_t(3U)) == 0
-                ? static_cast<ssize_t>(take)
-                : -1;
-            if (n > 0) {
-                memcpy(bytes + size, tmp, take);
+        auto *dm = get_dm(part->lkey);
+        if (dm && !read_dm()) {
+            part->storage = "device-read-skipped";
+            part->read_length = 0;
+            part->read_rc = ECANCELED;
+        } else if (dm) {
+            part->storage = "device";
+            part->read_length = (take + 3U) & ~size_t(3U);
+            memset(part->bytes, 0xa5, part->read_length);
+            part->read_rc = ibv_memcpy_from_dm(part->bytes, dm, part->address, part->read_length);
+            if (!part->read_rc) {
+                part->size = take;
             }
-            storage = "device";
         } else
 #endif
         {
-            iovec dst = {bytes + size, take};
-            iovec src = {reinterpret_cast<void *>(be64toh(seg->addr)), take};
-            n = process_vm_readv(getpid(), &dst, 1, &src, 1, 0);
-            storage = "dma";
+            part->storage = "dma";
+            iovec dst = {part->bytes, take};
+            iovec src = {reinterpret_cast<void *>(part->address), take};
+            ssize_t n = process_vm_readv(getpid(), &dst, 1, &src, 1, 0);
+            part->size = n < 0 ? 0 : static_cast<size_t>(n);
+            part->read_rc = n < 0 ? errno : 0;
         }
         errno = saved;
-        if (n > 0) {
-            size += static_cast<size_t>(n);
+        if (prefix_readable && size < limit) {
+            size_t copied = std::min(limit - size, part->size);
+            memcpy(bytes + size, part->bytes, copied);
+            size += copied;
+            prefix_readable = size == limit || part->size == take;
+            storage = prefix_readable ? part->storage : "unreadable";
         }
-        if (n != static_cast<ssize_t>(take)) {
-            storage = "unreadable";
-            break;
-        }
+        enqueue(part);
+        frame_offset += count;
     }
     msg->event = event;
     msg->storage = storage;

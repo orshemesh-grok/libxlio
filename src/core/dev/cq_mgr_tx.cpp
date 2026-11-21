@@ -181,6 +181,15 @@ std::string cq_mgr_tx::wqe_to_hexstring(uint16_t index, uint32_t credits) const
     return oss.str();
 }
 
+void cq_mgr_tx::trace_cqe(const xlio_mlx5_cqe *cqe)
+{
+    // cq_buf points at the trailing CQE64 in a 128-byte CQ slot.
+    size_t size = m_mlx5_cq.cqe_size;
+    const auto *slot = reinterpret_cast<const uint8_t *>(cqe) - (size - sizeof(*cqe));
+    tx_snapshot::raw_entry("TX_CQE", m_hqtx_ptr->m_mlx5_qp.qpn, ntohs(cqe->wqe_counter), slot, size,
+                           0, size, m_mlx5_cq.cq_num, m_mlx5_cq.cq_ci);
+}
+
 int cq_mgr_tx::poll_and_process_element_tx()
 {
     cq_logfuncall("");
@@ -252,7 +261,15 @@ void cq_mgr_tx::handle_sq_wqe_prop(unsigned index)
             m_hqtx_ptr->trace_packet(
                 p - m_hqtx_ptr->m_sq_wqe_idx_to_prop,
                 p->buf->m_flags & mem_buf_desc_t::HAD_CQE_ERROR ? "TX_ERROR" : "TX_DONE");
-            m_p_ring->mem_buf_desc_return_single_locked(p->buf);
+            const auto slot = p - m_hqtx_ptr->m_sq_wqe_idx_to_prop;
+            const auto &w = (*m_hqtx_ptr->m_sq_wqes)[slot];
+            unsigned counter = (ntohl(w.ctrl.data[0]) >> 8) & 0xffff;
+            tx_snapshot::metadata("TX_RETIRE", m_hqtx_ptr->m_mlx5_qp.qpn, counter,
+                                  {{"descriptor", reinterpret_cast<uintptr_t>(p->buf)},
+                                   {"charge", p->buf->tx.dev_mem_length},
+                                   {"cqn", m_mlx5_cq.cq_num},
+                                   {"cq_ci", m_mlx5_cq.cq_ci - 1U}});
+            m_p_ring->mem_buf_desc_return_single_locked(p->buf, counter);
         }
         if (p->ti) {
             xlio_ti *ti = p->ti;

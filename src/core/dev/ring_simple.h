@@ -69,7 +69,7 @@ public:
     void mem_buf_desc_return_single_to_owner_tx(mem_buf_desc_t *p_mem_buf_desc) override;
     void mem_buf_desc_return_single_multi_ref(mem_buf_desc_t *p_mem_buf_desc,
                                               unsigned ref) override;
-    void mem_buf_desc_return_single_locked(mem_buf_desc_t *buff);
+    void mem_buf_desc_return_single_locked(mem_buf_desc_t *buff, unsigned wqe);
     void return_tx_pool_to_global_pool();
     inline void convert_hw_time_to_system_time(uint64_t hwtime, struct timespec *systime)
     {
@@ -251,7 +251,7 @@ protected:
 private:
     inline void send_status_handler(int ret, xlio_ibv_send_wr *p_send_wqe);
     inline mem_buf_desc_t *get_tx_buffers(pbuf_type type, uint32_t n_num_mem_bufs);
-    inline int put_tx_buffer_helper(mem_buf_desc_t *buff);
+    inline int put_tx_buffer_helper(mem_buf_desc_t *buff, unsigned wqe = UINT32_MAX);
     inline int put_tx_buffers(mem_buf_desc_t *buff_list);
     inline int put_tx_single_buffer(mem_buf_desc_t *buff);
     inline void return_to_global_pool();

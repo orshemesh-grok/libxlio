@@ -77,7 +77,7 @@ public:
     void release_tx_buffers();
     uint32_t is_ratelimit_change(struct xlio_rate_limit_t &rate_limit);
     int modify_qp_ratelimit(struct xlio_rate_limit_t &rate_limit, uint32_t rl_changes);
-    void dm_release_data(mem_buf_desc_t *buff) { m_dm_mgr.release_data(buff); }
+    void dm_release_data(mem_buf_desc_t *buff, unsigned wqe) { m_dm_mgr.release_data(buff, wqe); }
 
 #ifdef DEFINED_UTLS
     xlio_tis *tls_context_setup_tx(const xlio_tls_info *info);

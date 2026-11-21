@@ -3,8 +3,11 @@
  */
 #include "util/tx_snapshot.h"
 
+#include <algorithm>
+#include <cstring>
 #include <cerrno>
 #include <cstdio>
+#include <cinttypes>
 #include <cstdlib>
 #include <fcntl.h>
 #include <new>
@@ -50,11 +53,42 @@ bool print_record(unsigned number, const message &msg)
 {
     constexpr char hex[] = "0123456789abcdef";
     constexpr size_t group_size = 16;
-    char line[2 * limit + (limit - 1) / group_size + 160];
+    char line[2 * limit + (limit - 1) / group_size + 640];
     int n = snprintf(line, sizeof(line), "%05u %s pid=%ld qp=%u wqe=%u ", number, msg.event,
                      (long)getpid(), msg.qp, msg.wqe);
+    if (msg.nfields) {
+        for (unsigned i = 0; i < msg.nfields; ++i) {
+            field f;
+            memcpy(&f, msg.bytes + i * sizeof(f), sizeof(f));
+            n += snprintf(line + n, sizeof(line) - n, "%s=%" PRIu64 " ", f.name, f.value);
+        }
+        n += snprintf(line + n, sizeof(line) - n, "%s\n", msg.bytes + msg.nfields * sizeof(field));
+        return write_all(line, n);
+    }
+    if (msg.cq_record) {
+        n += snprintf(line + n, sizeof(line) - n, "cqn=%u cq_ci=%u ", msg.cqn, msg.cq_ci);
+    }
     if (msg.api_send) {
         n += snprintf(line + n, sizeof(line) - n, "requested_bytes=%zu ", msg.requested);
+    }
+    if (msg.dm_copy) {
+        const auto &d = msg.copy;
+        n += snprintf(line + n, sizeof(line) - n,
+                      "sge=%d sge_count=%d frame_offset=%zu host=0x%" PRIxPTR
+                      " dm_handle=%u dm_offset=0x%zx lkey=0x%x allocation=%zu logical_len=%zu "
+                      "copy_len=%zu copy_rc=%d read_len=%zu read_rc=%d ",
+                      d.site.sge, d.site.sge_count, d.site.frame_offset, d.host, d.handle,
+                      d.dm_offset, d.lkey, d.allocation, d.logical_length, d.copy_length, d.copy_rc,
+                      d.read_length, d.read_rc);
+    }
+    if (msg.stage) {
+        n += snprintf(line + n, sizeof(line) - n, "stage=%s offset=%zu total=%zu ", msg.stage,
+                      msg.offset, msg.total);
+        if (msg.segment >= 0) {
+            n += snprintf(line + n, sizeof(line) - n,
+                          "segment=%d addr=0x%" PRIx64 " lkey=0x%x read_len=%zu read_rc=%d ",
+                          msg.segment, msg.address, msg.lkey, msg.read_length, msg.read_rc);
+        }
     }
     n += snprintf(line + n, sizeof(line) - n, "storage=%s bytes=%zu hex=", msg.storage, msg.size);
     for (size_t i = 0; i < msg.size; ++i) {
@@ -169,6 +203,66 @@ message *allocate()
     auto *msg = new (std::nothrow) message;
     errno = saved;
     return msg;
+}
+
+bool read_dm()
+{
+    static const bool enabled = [] {
+        const char *v = getenv("XLIO_TX_SNAPSHOT_SKIP_DM_READBACK");
+        return !v || strcmp(v, "1") != 0;
+    }();
+    return enabled;
+}
+
+void metadata(const char *event, unsigned qp, unsigned wqe, std::initializer_list<field> fields,
+              const char *description)
+{
+    auto *msg = allocate();
+    if (!msg) {
+        return;
+    }
+    size_t used = fields.size() * sizeof(field);
+    if (used >= limit || !used) {
+        delete msg;
+        return;
+    }
+    msg->qp = qp;
+    msg->wqe = wqe;
+    msg->event = event;
+    msg->nfields = fields.size();
+    memcpy(msg->bytes, fields.begin(), used);
+    size_t n = strnlen(description, limit - used - 1);
+    memcpy(msg->bytes + used, description, n);
+    msg->bytes[used + n] = 0;
+    enqueue(msg);
+}
+
+void raw_entry(const char *event, unsigned qp, unsigned wqe, const uint8_t *ring, size_t ring_size,
+               size_t start, size_t length, unsigned cqn, unsigned ci)
+{
+    for (size_t offset = 0; offset < length; offset += limit) {
+        auto *msg = allocate();
+        if (!msg) {
+            return;
+        }
+        msg->event = event;
+        msg->stage = event;
+        msg->cq_record = strcmp(event, "TX_CQE") == 0;
+        msg->cqn = cqn;
+        msg->cq_ci = ci;
+        msg->qp = qp;
+        msg->wqe = wqe;
+        msg->storage = "queue";
+        msg->api_send = false;
+        msg->total = length;
+        msg->offset = offset;
+        msg->size = std::min(limit, length - offset);
+        size_t pos = (start + offset) % ring_size;
+        size_t first = std::min(msg->size, ring_size - pos);
+        memcpy(msg->bytes, ring + pos, first);
+        memcpy(msg->bytes + first, ring, msg->size - first);
+        enqueue(msg);
+    }
 }
 
 void enqueue(message *msg)

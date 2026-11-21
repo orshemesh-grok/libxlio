@@ -286,9 +286,10 @@ void hw_queue_tx::up()
 
 void hw_queue_tx::down()
 {
-    if (m_dm_enabled) {
-        m_dm_mgr.release_resources();
-    }
+    // Existing WQEs still reference DM during the final CQ drain. Prevent
+    // new DM copies for the teardown WQE while retaining the readback mapping.
+    const bool release_dm = m_dm_enabled;
+    m_dm_enabled = false;
 
     hwqtx_logdbg("QP current state: %d", priv_ibv_query_qp_state(m_mlx5_qp.qp));
     modify_queue_to_error_state();
@@ -301,6 +302,9 @@ void hw_queue_tx::down()
     usleep(1000);
 
     release_tx_buffers();
+    if (release_dm) {
+        m_dm_mgr.release_resources();
+    }
     m_p_cq_mgr_tx->del_qp_tx(this);
 }
 
@@ -461,8 +465,8 @@ void hw_queue_tx::init_device_memory()
      */
     if (m_p_ib_ctx_handler->get_on_device_memory_size() > 0 &&
         is_bf(m_p_ib_ctx_handler->get_ibv_context())) {
-        m_dm_enabled =
-            m_dm_mgr.allocate_resources(m_p_ib_ctx_handler, m_p_ring->m_p_ring_stat.get());
+        m_dm_enabled = m_dm_mgr.allocate_resources(m_p_ib_ctx_handler,
+                                                   m_p_ring->m_p_ring_stat.get(), m_mlx5_qp.qpn);
     }
 }
 
@@ -495,6 +499,11 @@ inline void hw_queue_tx::ring_doorbell(uint8_t num_wqebb, bool skip_comp /*=fals
         m_b_fence_needed = false;
     }
 
+    const auto *ring = reinterpret_cast<const uint8_t *>(m_sq_wqes);
+    tx_snapshot::raw_entry("TX_WQE", m_mlx5_qp.qpn, m_sq_wqe_counter, ring, m_sq_wqes_end - ring,
+                           reinterpret_cast<const uint8_t *>(ctrl) - ring, num_wqebb * WQEBB);
+
+    const unsigned old_pi = m_sq_wqe_counter;
     m_sq_wqe_counter = (m_sq_wqe_counter + num_wqebb) & 0xFFFF;
 
     // Make sure that descriptors are written before
@@ -504,13 +513,20 @@ inline void hw_queue_tx::ring_doorbell(uint8_t num_wqebb, bool skip_comp /*=fals
 
     // This wc_wmb ensures ordering between DB record and BF copy
     wc_wmb();
-    *dst = *src;
+    uint64_t doorbell = *src;
+    *dst = doorbell;
 
     /* Use wc_wmb() to ensure write combining buffers are flushed out
      * of the running CPU.
      * sfence instruction affects only the WC buffers of the CPU that executes it
      */
     wc_wmb();
+    tx_snapshot::metadata("TX_PUBLISH", m_mlx5_qp.qpn, old_pi,
+                          {{"old_pi", old_pi},
+                           {"new_pi", m_sq_wqe_counter},
+                           {"wqebbs", num_wqebb},
+                           {"dbrec_be_value", m_sq_wqe_counter},
+                           {"doorbell_be64", be64toh(doorbell)}});
 }
 
 inline int hw_queue_tx::fill_inl_segment(sg_array &sga, uint8_t *cur_seg, uint8_t *data_addr,
@@ -659,6 +675,7 @@ inline int hw_queue_tx::fill_wqe_send(xlio_ibv_send_wr *pswr)
     wqe_size += 1;
     dseg = (struct mlx5_wqe_data_seg *)((uintptr_t)eseg + OCTOWORD);
 
+    size_t frame_offset = 0;
     for (int i = 0; i < pswr->num_sge; ++i) {
         if (unlikely((uintptr_t)dseg >= (uintptr_t)m_sq_wqes_end)) {
             dseg = (struct mlx5_wqe_data_seg *)m_sq_wqes;
@@ -667,11 +684,14 @@ inline int hw_queue_tx::fill_wqe_send(xlio_ibv_send_wr *pswr)
             dseg->byte_count = htonl(pswr->sg_list[i].length);
             /* Try to copy data to On Device Memory in first */
             if (!(m_dm_enabled &&
-                  m_dm_mgr.copy_data(dseg, (uint8_t *)((uintptr_t)pswr->sg_list[i].addr),
-                                     pswr->sg_list[i].length, (mem_buf_desc_t *)pswr->wr_id))) {
+                  m_dm_mgr.copy_data(
+                      dseg, (uint8_t *)((uintptr_t)pswr->sg_list[i].addr), pswr->sg_list[i].length,
+                      (mem_buf_desc_t *)pswr->wr_id,
+                      {m_mlx5_qp.qpn, m_sq_wqe_counter, i, pswr->num_sge, frame_offset}))) {
                 dseg->lkey = htonl(pswr->sg_list[i].lkey);
                 dseg->addr = htonll((uintptr_t)pswr->sg_list[i].addr);
             }
+            frame_offset += pswr->sg_list[i].length;
             ++dseg;
             wqe_size += sizeof(struct mlx5_wqe_data_seg) / OCTOWORD;
         }
